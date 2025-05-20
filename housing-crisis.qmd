@@ -1,0 +1,495 @@
+---
+title: "housing-crisis"
+---
+
+```{r}
+# Install and load required packages
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(eurostat, WDI, tidyverse, data.table, here, janitor, countrycode)
+
+# Create a data directory if it doesn't exist
+data_dir <- here::here("data")
+if (!dir.exists(data_dir)) {
+    dir.create(data_dir, recursive = TRUE)
+}
+
+# Function to check if data exists and download if not
+get_data <- function(filename, download_function) {
+    file_path <- file.path(data_dir, filename)
+
+    if (file.exists(file_path)) {
+        message(paste0("Loading existing data from: ", filename))
+        return(readRDS(file_path))
+    } else {
+        message(paste0("Downloading data to: ", filename))
+        tryCatch(
+            {
+                data <- download_function()
+                saveRDS(data, file_path)
+                return(data)
+            },
+            error = function(e) {
+                message(paste0("Error downloading data: ", e$message))
+                return(NULL)
+            }
+        )
+    }
+}
+
+# Function to download housing data from Eurostat
+download_housing_data <- function() {
+    # House price index (2015 = 100) - quarterly data
+    house_price_index <- get_eurostat(
+        "prc_hpi_q",
+        time_format = "date",
+        cache = FALSE
+    )
+
+    # Housing cost overburden rate by tenure status
+    housing_cost_overburden <- tryCatch(
+        {
+            get_eurostat("ilc_lvho07c",
+                time_format = "date",
+                cache = FALSE
+            )
+        },
+        error = function(e) {
+            message(paste0("Error downloading housing cost overburden data: ", e$message))
+            return(NULL)
+        }
+    )
+
+    # Rental price index
+    housing_rental_prices <- tryCatch(
+        {
+            get_eurostat("prc_hicp_midx",
+                filters = list(coicop = "CP041"),
+                time_format = "date",
+                cache = FALSE
+            )
+        },
+        error = function(e) {
+            message(paste0("Error downloading rental price data: ", e$message))
+            return(NULL)
+        }
+    )
+
+    # Building permits - number of dwellings
+    building_permits <- tryCatch(
+        {
+            get_eurostat("sts_cobp_q",
+                time_format = "date",
+                cache = FALSE
+            )
+        },
+        error = function(e) {
+            message(paste0("Error downloading building permits data: ", e$message))
+            return(NULL)
+        }
+    )
+
+    list(
+        house_price_index = house_price_index,
+        housing_cost_overburden = housing_cost_overburden,
+        housing_rental_prices = housing_rental_prices,
+        building_permits = building_permits
+    )
+}
+
+# Function to download migration data from Eurostat
+download_migration_data <- function() {
+    # Immigration by age group, sex and country of birth
+    immigration <- tryCatch(
+        {
+            get_eurostat("migr_imm3ctb",
+                time_format = "date",
+                cache = FALSE
+            )
+        },
+        error = function(e) {
+            message(paste0("Error downloading immigration data: ", e$message))
+            return(NULL)
+        }
+    )
+
+    # Emigration by age group, sex and country of next usual residence
+    emigration <- tryCatch(
+        {
+            get_eurostat("migr_emi3nxt",
+                time_format = "date",
+                cache = FALSE
+            )
+        },
+        error = function(e) {
+            message(paste0("Error downloading emigration data: ", e$message))
+            return(NULL)
+        }
+    )
+
+    # Population by country of birth
+    pop_by_birth <- tryCatch(
+        {
+            get_eurostat("migr_pop3ctb",
+                time_format = "date",
+                cache = FALSE
+            )
+        },
+        error = function(e) {
+            message(paste0("Error downloading population by birth data: ", e$message))
+            return(NULL)
+        }
+    )
+
+    # Net migration plus statistical adjustment
+    net_migration <- tryCatch(
+        {
+            get_eurostat("demo_gind",
+                time_format = "date",
+                cache = FALSE
+            )
+        },
+        error = function(e) {
+            message(paste0("Error downloading net migration data: ", e$message))
+            return(NULL)
+        }
+    )
+
+    list(
+        immigration = immigration,
+        emigration = emigration,
+        pop_by_birth = pop_by_birth,
+        net_migration = net_migration
+    )
+}
+
+# Function to download population and economic data from World Bank
+download_worldbank_data <- function() {
+    # Define indicators
+    indicators <- c(
+        "SP.POP.TOTL", # Total population
+        "SP.POP.GROW", # Population growth (annual %)
+        "NY.GDP.PCAP.KD", # GDP per capita (constant 2015 US$)
+        "FP.CPI.TOTL.ZG", # Inflation, consumer prices (annual %)
+        "FR.INR.RINR", # Real interest rate (%)
+        "NY.GNS.ICTR.ZS" # Gross savings (% of GDP)
+    )
+
+    # Download World Bank data
+    wb_data <- tryCatch(
+        {
+            WDI(
+                indicator = indicators,
+                start = 2000,
+                end = 2025,
+                extra = TRUE # get additional country information
+            )
+        },
+        error = function(e) {
+            message(paste0("Error downloading World Bank data: ", e$message))
+            return(NULL)
+        }
+    )
+
+    return(wb_data)
+}
+
+message("Downloading housing data from Eurostat...")
+housing_data <- get_data("housing_data.rds", download_housing_data)
+
+message("Downloading migration data from Eurostat...")
+migration_data <- get_data("migration_data.rds", download_migration_data)
+
+message("Downloading economic data from World Bank...")
+worldbank_data <- get_data("worldbank_data.rds", download_worldbank_data)
+```
+
+
+```{r}
+# Function to harmonize country codes across datasets
+harmonize_country_codes <- function(data, source_type) {
+    if (is.null(data)) {
+        return(NULL)
+    }
+
+    if (source_type == "eurostat") {
+        # For Eurostat data, convert geo column to ISO3C codes
+        if ("geo" %in% names(data)) {
+            data <- data %>%
+                mutate(country_code = case_when(
+                    # Handle special cases
+                    geo == "EU27_2020" ~ "EU27",
+                    geo == "EA19" ~ "EA19",
+                    # For standard country codes
+                    TRUE ~ countrycode(geo, "eurostat", "iso3c", warn = FALSE)
+                ))
+        }
+    } else if (source_type == "worldbank") {
+        # For World Bank data, iso3c is already available
+        # Just rename for consistency
+        if ("iso3c" %in% names(data)) {
+            data <- data %>%
+                rename(country_code = iso3c)
+        }
+    }
+
+    return(data)
+}
+
+# Process housing data
+preprocess_housing_data <- function(housing_data) {
+    if (is.null(housing_data)) {
+        return(NULL)
+    }
+
+    # Process house price index
+    hpi <- housing_data$house_price_index
+    if (!is.null(hpi)) {
+        hpi <- hpi %>%
+            filter(unit == "I15") %>% # Index 2015=100
+            harmonize_country_codes("eurostat") %>%
+            select(country_code, time, values) %>%
+            rename(house_price_index = values, date = time)
+    }
+
+    # Process housing cost overburden
+    overburden <- housing_data$housing_cost_overburden
+    if (!is.null(overburden)) {
+        overburden <- overburden %>%
+            filter(tenure == "TOTAL") %>%
+            harmonize_country_codes("eurostat") %>%
+            select(country_code, time, values) %>%
+            rename(housing_cost_overburden = values, date = time)
+    }
+
+    # Process rental prices
+    rentals <- housing_data$housing_rental_prices
+    if (!is.null(rentals)) {
+        rentals <- rentals %>%
+            harmonize_country_codes("eurostat") %>%
+            select(country_code, time, values) %>%
+            rename(rental_price_index = values, date = time)
+    }
+
+    # Process building permits
+    permits <- housing_data$building_permits
+    if (!is.null(permits)) {
+        permits <- permits %>%
+            filter(unit == "I15") %>% # Index 2015=100
+            harmonize_country_codes("eurostat") %>%
+            select(country_code, time, values) %>%
+            rename(building_permits_index = values, date = time)
+    }
+
+    return(list(
+        house_price_index = hpi,
+        housing_cost_overburden = overburden,
+        rental_price_index = rentals,
+        building_permits_index = permits
+    ))
+}
+
+# Process migration data
+preprocess_migration_data <- function(migration_data) {
+    if (is.null(migration_data)) {
+        return(NULL)
+    }
+
+    # Process immigration data
+    immigration <- migration_data$immigration
+    if (!is.null(immigration)) {
+        immigration <- immigration %>%
+            filter(
+                age == "TOTAL",
+                sex == "T",
+                c_birth != "TOTAL" # Exclude totals to avoid double counting
+            ) %>%
+            group_by(geo, time) %>%
+            summarize(immigration_total = sum(values, na.rm = TRUE), .groups = "drop") %>%
+            harmonize_country_codes("eurostat") %>%
+            select(country_code, time, immigration_total) %>%
+            rename(date = time)
+    }
+
+    # Process emigration data
+    emigration <- migration_data$emigration
+    if (!is.null(emigration)) {
+        emigration <- emigration %>%
+            filter(
+                age == "TOTAL",
+                sex == "T",
+                nxt_usual != "TOTAL" # Exclude totals to avoid double counting
+            ) %>%
+            group_by(geo, time) %>%
+            summarize(emigration_total = sum(values, na.rm = TRUE), .groups = "drop") %>%
+            harmonize_country_codes("eurostat") %>%
+            select(country_code, time, emigration_total) %>%
+            rename(date = time)
+    }
+
+    # Process population by country of birth
+    pop_by_birth <- migration_data$pop_by_birth
+    if (!is.null(pop_by_birth)) {
+        pop_by_birth <- pop_by_birth %>%
+            filter(
+                age == "TOTAL",
+                sex == "T"
+            ) %>%
+            # Calculate percentage of foreign-born
+            group_by(geo, time) %>%
+            mutate(total_pop = sum(values[c_birth == "TOTAL"], na.rm = TRUE)) %>%
+            filter(c_birth != "TOTAL") %>% # Remove total to avoid double counting
+            summarize(
+                foreign_born_total = sum(values, na.rm = TRUE),
+                foreign_born_pct = 100 * foreign_born_total / first(total_pop),
+                .groups = "drop"
+            ) %>%
+            harmonize_country_codes("eurostat") %>%
+            select(country_code, time, foreign_born_total, foreign_born_pct) %>%
+            rename(date = time)
+    }
+
+    # Process net migration data
+    net_migration <- migration_data$net_migration
+    if (!is.null(net_migration)) {
+        net_migration <- net_migration %>%
+            filter(indic_de == "GRATE") %>% # Growth rate
+            harmonize_country_codes("eurostat") %>%
+            select(country_code, time, values) %>%
+            rename(net_migration_rate = values, date = time)
+    }
+
+    return(list(
+        immigration = immigration,
+        emigration = emigration,
+        pop_by_birth = pop_by_birth,
+        net_migration = net_migration
+    ))
+}
+
+# Process World Bank data
+preprocess_worldbank_data <- function(wb_data) {
+    if (is.null(wb_data)) {
+        return(NULL)
+    }
+
+    # Reshape from wide to long format for consistency
+    wb_long <- wb_data %>%
+        pivot_longer(
+            cols = c(
+                SP.POP.TOTL, SP.POP.GROW, NY.GDP.PCAP.KD,
+                FP.CPI.TOTL.ZG, FR.INR.RINR, NY.GNS.ICTR.ZS
+            ),
+            names_to = "indicator",
+            values_to = "value"
+        ) %>%
+        # Add readable indicator names
+        mutate(indicator_name = case_when(
+            indicator == "SP.POP.TOTL" ~ "population_total",
+            indicator == "SP.POP.GROW" ~ "population_growth",
+            indicator == "NY.GDP.PCAP.KD" ~ "gdp_per_capita",
+            indicator == "FP.CPI.TOTL.ZG" ~ "inflation_rate",
+            indicator == "FR.INR.RINR" ~ "real_interest_rate",
+            indicator == "NY.GNS.ICTR.ZS" ~ "gross_savings_pct",
+            TRUE ~ indicator
+        )) %>%
+        # Rename for consistency
+        rename(country_code = iso3c, country_name = country, date = year) %>%
+        # Keep only necessary columns
+        select(country_code, country_name, date, indicator_name, value)
+
+    return(wb_long)
+}
+
+# Execute preprocessing
+message("Preprocessing housing data...")
+housing_processed <- preprocess_housing_data(housing_data)
+
+message("Preprocessing migration data...")
+migration_processed <- preprocess_migration_data(migration_data)
+
+message("Preprocessing World Bank data...")
+worldbank_processed <- preprocess_worldbank_data(worldbank_data)
+```
+
+
+```{r}
+# Function to combine all datasets for analysis
+combine_datasets <- function(housing_processed, migration_processed, worldbank_processed) {
+    # Start with countries and years available in housing data
+    if (!is.null(housing_processed$house_price_index)) {
+        base_data <- housing_processed$house_price_index %>%
+            select(country_code, date) %>%
+            # Get to annual level for compatibility with other datasets
+            mutate(year = lubridate::year(date)) %>%
+            group_by(country_code, year) %>%
+            summarize(date = min(date), .groups = "drop") # Take first date in each year
+
+        # Join with other housing indicators
+        if (!is.null(housing_processed$housing_cost_overburden)) {
+            housing_annual <- housing_processed$housing_cost_overburden %>%
+                mutate(year = lubridate::year(date)) %>%
+                group_by(country_code, year) %>%
+                summarize(
+                    housing_cost_overburden = mean(housing_cost_overburden, na.rm = TRUE),
+                    .groups = "drop"
+                )
+
+            base_data <- base_data %>%
+                left_join(housing_annual, by = c("country_code", "year"))
+        }
+
+        # Continue joining other datasets...
+        # [Additional joins for rental prices, building permits, migration data, etc.]
+
+        # Join with World Bank data
+        if (!is.null(worldbank_processed)) {
+            # Reshape World Bank data for joining
+            wb_wide <- worldbank_processed %>%
+                filter(!is.na(country_code)) %>%
+                mutate(year = as.numeric(date)) %>%
+                select(-date) %>%
+                pivot_wider(
+                    id_cols = c(country_code, year),
+                    names_from = indicator_name,
+                    values_from = value
+                )
+
+            base_data <- base_data %>%
+                left_join(wb_wide, by = c("country_code", "year"))
+        }
+
+        # Remove date column (keep only year for annual analysis)
+        base_data <- base_data %>%
+            select(-date) %>%
+            # Add regional information based on country code
+            mutate(
+                region = countrycode(country_code, "iso3c", "region", warn = FALSE),
+                income_group = countrycode(country_code, "iso3c", "income_group", warn = FALSE)
+            )
+
+        return(base_data)
+    } else {
+        message("House price index data not available. Cannot create combined dataset.")
+        return(NULL)
+    }
+}
+
+# Combine datasets
+message("Combining datasets for analysis...")
+combined_data <- combine_datasets(housing_processed, migration_processed, worldbank_processed)
+
+# Save the final cleaned data
+saveRDS(combined_data, file.path(data_dir, "combined_data.rds"))
+saveRDS(list(
+    housing = housing_processed,
+    migration = migration_processed,
+    worldbank = worldbank_processed
+), file.path(data_dir, "all_processed_data.rds"))
+
+# Export to CSV for easier inspection
+if (!is.null(combined_data)) {
+    write.csv(combined_data, file.path(data_dir, "combined_data.csv"), row.names = FALSE)
+}
+
+message("Data download and preprocessing complete. Data saved to the 'data' directory.")
+```
