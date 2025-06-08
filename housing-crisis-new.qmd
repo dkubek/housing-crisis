@@ -19,97 +19,249 @@ library(readxl)
 
 ### Data Explanation
 
-1.) Describe data source and dataset descriptions
+#### Housing Cost Overburden Rate (`overburden_rate`)
 
-  - What do the numbers mean?
+**What the numbers mean**: 
 
-  - How were the data collected?
-    - In Eurostat dataset description, how are these data collected? Are they derived from some other indices? Are they collected directly? Are they inferred from any other indicators?
+This indicator shows the percentage of the population living in households where
+total housing costs (rent, mortgage, utilities, maintenance) represent more than
+40% of disposable household income. A value of 25% means that 1 in 4 people
+spend over 40% of their income on housing.
 
-  - What subset of data has been chosen? Why?
-    - How can I filter the data from Eurostat (by which filters and options) to get the same results?
+**How data is collected**: 
+- Data comes from EU-SILC (European Union Statistics on Income and Living Conditions), an annual survey covering private households
+- Combines interview data with administrative records from government databases
+- Households are followed for 4 years to track changes over time
 
-  - What transformations of data have been done? *WHY?*
+**Data selection**:
+- **Applied filters**: 
+  - Year: 2023
+  - All other parameters set to totals (no breakdown by age, sex, or poverty status)
+- **Why these filters**: Provides overall national picture without demographic subdivisions
 
-  - What is the range of the data (i.e.) Can the numbers be from arbitrary range? Are they bounded? What do the extreme data mean
-  
-    * `overburden_rate`: Housing cost overburden rate by age, sex and poverty status
+**Data transformations**: None - data used as provided by Eurostat
 
-      - Online data code: ilc_lvho07a 
+**Important considerations**:
+- Different countries may have varying housing market structures (ownership vs. rental)
 
-      - Filtered by:
-        - year: 2023
-        - (totals for all other parameters)
+**Sources**: 
+- Dataset: [ilc_lvho07a](https://ec.europa.eu/eurostat/databrowser/view/ilc_lvho07a/default/table?lang=en)
+- Metadata: [EU-SILC Methodology](https://ec.europa.eu/eurostat/cache/metadata/en/ilc_sieusilc.htm)
 
 
-    Metadata: https://ec.europa.eu/eurostat/cache/metadata/en/ilc_sieusilc.htm
-    Dataset: https://ec.europa.eu/eurostat/databrowser/view/ilc_lvho07a/default/table?lang=en
-      
-    * `one_person_household_2023`: Number of households by household composition, number of children and age of youngest child (1 000)
+#### One-Person Households 2023 (`one_person_household_2023`)
 
-      - Online data code: `lfst_hhnhtych`
-      - Filtered by
-        - `year`: 2023
-        - `hhcomp`: [HHC_22] Single adult without children
-        - (totals for all other parameters)
+**Meaning**: 
+Number of households consisting of a single adult living alone, expressed in
+thousands (000s). A value of 1,5 means there are 15 000 single-person households
+in the country.
 
-      Dataset: https://ec.europa.eu/eurostat/databrowser/view/lfst_hhnhtych/default/table?lang=en
-      Metadata: https://ec.europa.eu/eurostat/cache/metadata/en/lfst_hh_esms.htm
+**How data is collected**:
+- Data from the Labour Force Survey (LFS), a large quarterly household survey
+- Based on resident population in private households
+- Collected through interviews (face-to-face, phone, or online)
 
-    * `total_households`: Number of households by household composition, number of children and age of youngest child (1 000)
+**Data selection**:
+- **Applied filters**:
+  - Year: 2023
+  - Household composition: Single adult without children [HHC_22]
+  - All other parameters as totals
 
-      - Online data code: `lfst_hhnhtych`
-      - Filtered by
-        - `year`: 2023
-        - `hhcomp`: [TOTAL] Total
-        - (totals for all other parameters)
+- **Why these filters**: Isolates specifically one-person households from all household types
 
-      Dataset: https://ec.europa.eu/eurostat/databrowser/view/lfst_hhnhtych/default/table?lang=en
-      Metadata: https://ec.europa.eu/eurostat/cache/metadata/en/lfst_hh_esms.htm
+**Data transformations**: None - raw count data
 
-    * `population_change_2023`: 
+**Data range and interpretation**:
+- **Interpretation**: Higher numbers indicate more people living alone
+- Should be compared to total households for meaningful analysis
 
-      - Filtered by:
-        - `indic_de`: (net migration) index.
-        [CNMIGRATRT]Crude rate of net migration plus statistical adjustment
-      
-        > change in the number of persons per 1000 persons of average population: net migration (including statistical adjustment). The net migration plus adjustment is calculated as the difference between the total change and the natural change of the population
+**Important considerations**:
+- Excludes collective/institutional households
+- Cultural factors strongly influence household composition
+- Urban areas typically have higher rates of single-person households
+- Economic factors (housing costs, income levels) affect household formation
 
-      Dataset: https://ec.europa.eu/eurostat/databrowser/view/tps00019/default/table?lang=en
-      Metadata: https://ec.europa.eu/eurostat/cache/metadata/en/demo_gind_esms.htm
+**Sources**:
+- Dataset: [lfst_hhnhtych](https://ec.europa.eu/eurostat/databrowser/view/lfst_hhnhtych/default/table?lang=en)
+- Metadata: [LFS Household Statistics](https://ec.europa.eu/eurostat/cache/metadata/en/lfst_hh_esms.htm)
 
-    * `gdp_per_cap`: GDP per capita in PPS
+---
 
-      - Online data code: tec00114
-      - Filtered by:
-        - year: `2023`
-        - (all other parameters kept at total)
+#### Total Households (`total_households`)
 
-      Dataset: https://ec.europa.eu/eurostat/databrowser/view/tec00114/default/table?lang=en
-      Metadata: https://ec.europa.eu/eurostat/cache/metadata/en/prc_ppp_esms.htm
-    
-    * `gov_expenditure`: General government expenditure by function (COFOG)    
+**Meaning**: 
+Total number of all households in the country, expressed in thousands (000s).
+This includes all household types: single-person, couples, families with
+children, etc.
 
-      - Online data code: gov_10a_exp
+**How data is collected**: Same as one-person households (Labour Force Survey)
 
-      - Filtered by: ???
-      
-        Dataset: https://ec.europa.eu/eurostat/databrowser/view/gov_10a_exp__custom_17012254/default/table?lang=en
-        Metadata: https://ec.europa.eu/eurostat/cache/metadata/en/gov_10a_exp_esms.htm
-    
-    * `hicp_avg`: HICP - monthly data (index)
+**Data selection**:
+- **Applied filters**:
+  - Year: 2023
+  - Household composition: TOTAL (all types)
+  - All other parameters as totals
 
-      - Online data code: prc_hicp_midx
+- **Why these filters**: Provides denominator for calculating household composition percentages
 
-      - Filtered by:
-        - `coicop`: ????
+**Data transformations**: None - raw count data
 
-      - Transformations:
-        - average monthly data over the entire year
+**Sources**:
+- Dataset: [lfst_hhnhtych](https://ec.europa.eu/eurostat/databrowser/view/lfst_hhnhtych/default/table?lang=en)
+- Metadata: [LFS Household Statistics](https://ec.europa.eu/eurostat/cache/metadata/en/lfst_hh_esms.htm)
 
-      - Dataset: https://ec.europa.eu/eurostat/databrowser/view/prc_hicp_midx/default/table?lang=en
-      - https://ec.europa.eu/eurostat/cache/metadata/en/prc_hicp_esms.htm
 
+#### Population Change 2023 (`population_change_2023`)
+
+**Meaning**: 
+Net migration rate per 1,000 population, calculated as the difference between
+immigration and emigration plus statistical adjustments. A value of +5.0 means
+net immigration added 5 people per 1,000 residents.
+
+**How data is collected**:
+- Combination of population registers, immigration/emigration records, and census data
+- Calculated as: (Total population change - Natural change) / Average population × 1,000
+- Includes statistical adjustments for registration delays and estimation errors
+
+**Data selection**:
+- **Applied filters**:
+  - Indicator: Crude rate of net migration plus statistical adjustment [CNMIGRATRT]
+  - Year: 2023
+
+**Data range and interpretation**:
+- **Possible values**: Typically -20 to +20 per 1,000
+- **Positive values**: More people moving in than out
+- **Negative values**: More people leaving than arriving
+- **Near zero**: Balanced migration flows
+
+**Important considerations**:
+- "Statistical adjustment" accounts for registration delays, unregistered migration, and data inconsistencies
+- Quality varies by country depending on registration systems
+- Does not distinguish between EU and non-EU migration
+- Affected by economic conditions, conflicts, and policy changes
+
+**Sources**:
+- Dataset: [tps00019](https://ec.europa.eu/eurostat/databrowser/view/tps00019/default/table?lang=en)
+- Metadata: [Demographic Statistics](https://ec.europa.eu/eurostat/cache/metadata/en/demo_gind_esms.htm)
+
+
+### GDP per Capita (`gdp_per_cap`)
+
+**What the numbers mean**: 
+Gross Domestic Product per person expressed in Purchasing Power Standards (PPS),
+which eliminates price level differences between countries. A value of 25,000
+means each person's share of national economic output equals 25,000 PPS units.
+
+**How data is collected**:
+- GDP from national accounts (production, income, and expenditure approaches)
+- Population from demographic statistics
+- Price surveys across countries to calculate purchasing power adjustments
+
+**Data selection**:
+- **Applied filters**:
+  - Year: 2023
+  - Measure: GDP per capita in PPS
+- **Why these filters**: PPS allows meaningful cross-country comparisons
+
+**Data transformations**: 
+- GDP divided by total population
+- Converted to PPS using Purchasing Power Parities to adjust for price differences
+
+**Data range and interpretation**:
+- **Higher values**: Higher material living standards
+- **Lower values**: Lower material living standards
+- Does not measure inequality or well-being
+
+**Important considerations**:
+- PPS is an artificial currency for comparison only
+- Reflects volume of goods/services, not welfare or happiness
+- Influenced by working hours, employment rates, and productivity
+- May not reflect cost of living for specific groups
+
+**Sources**:
+- Dataset: [tec00114](https://ec.europa.eu/eurostat/databrowser/view/tec00114/default/table?lang=en)
+- Metadata: [Purchasing Power Parities](https://ec.europa.eu/eurostat/cache/metadata/en/prc_ppp_esms.htm)
+
+
+### Government Expenditure (`gov_expenditure`)
+
+**What the numbers mean**: 
+Total government spending broken down by function (health, education, defense,
+etc.) according to COFOG classification. Values can be in millions of Euro,
+national currency, or as percentage of GDP.
+
+**How data is collected**:
+- Administrative data from government accounting systems
+- Based on ESA 2010 accounting standards
+- Includes all levels of government (central, regional, local, social security)
+
+**Data selection**:
+- **Applied filters**: ??? (UNKNOWN - needs clarification from team member)
+- **Why these filters**: ??? 
+
+**Data transformations**: ??? (Depends on whether using absolute values or % of GDP)
+
+**Data range and interpretation**:
+- **As % of GDP**: Typically 35-55% for EU countries
+- **Main categories** (COFOG divisions):
+  - General public services (01)
+  - Defence (02)
+  - Public order and safety (03)
+  - Economic affairs (04)
+  - Environmental protection (05)
+  - Housing and community (06)
+  - Health (07)
+  - Recreation, culture, religion (08)
+  - Education (09)
+  - Social protection (10)
+
+**Important considerations**:
+- Different institutional arrangements affect comparability (e.g., public vs. private healthcare)
+- Some transactions are consolidated to avoid double-counting
+- Classification challenges for multi-purpose expenditures
+- Time lags in data availability (usually t+12 months)
+
+**Sources**:
+- Dataset: [gov_10a_exp](https://ec.europa.eu/eurostat/databrowser/view/gov_10a_exp__custom_17012254/default/table?lang=en)
+- Metadata: [Government Expenditure by Function](https://ec.europa.eu/eurostat/cache/metadata/en/gov_10a_exp_esms.htm)
+
+
+### HICP Average (`hicp_avg`)
+
+**Meaning**: 
+The Harmonised Index of Consumer Prices measures inflation by tracking price
+changes of goods and services purchased by households. An index of 110 means
+prices are 10% higher than the base year (2015=100).
+
+**How data is collected**:
+- Monthly price collection from shops, service providers, and online
+- Covers all household consumption: food, housing, transport, recreation, etc.
+- Weighted by household expenditure patterns
+
+**Data selection**:
+- **Applied filters**: 
+  - COICOP category: ???? (UNKNOWN - needs clarification)
+  - Time period: Monthly data for specified year
+- **Why these filters**: ????
+
+**Data transformations**: 
+- Average of 12 monthly index values
+- Why: Annual average smooths seasonal variations and provides yearly inflation picture
+
+**Data range and interpretation**:
+- **Possible values**: Index typically 80-150 (2015=100)
+- **Year-on-year change** = inflation rate
+- **Rising values**: Prices increasing (inflation)
+- **Falling values**: Prices decreasing (deflation)
+- 2-3% annual increase considered price stability
+
+**Important considerations**:
+- Quality adjustments made for product improvements
+- Basket of goods updated annually to reflect consumption patterns
+
+**Sources**:
+- Dataset: [prc_hicp_midx](https://ec.europa.eu/eurostat/databrowser/view/prc_hicp_midx/default/table?lang=en)
+- Metadata: [HICP Methodology](https://ec.europa.eu/eurostat/cache/metadata/en/prc_hicp_esms.htm)
 
 
 ```{r}
