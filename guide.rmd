@@ -1,0 +1,1233 @@
+---
+title: "Linear Regression for Housing Affordability Analysis"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: readable
+---
+
+```{r setup, include=FALSE}
+# Set up the R environment
+knitr::opts_chunk$set(
+  echo = TRUE,           # Show code
+  warning = FALSE,       # Hide warnings
+  message = FALSE,       # Hide messages
+  fig.width = 10,        # Set figure width
+  fig.height = 6         # Set figure height
+)
+
+install.packages("tidyverse")
+install.packages("scales")
+install.packages("patchwork")
+
+# Load required libraries
+library(tidyverse)     # For data manipulation and visualization
+library(scales)        # For formatting numbers and axes
+library(patchwork)     # For combining plots
+
+# Set a consistent theme for all plots
+theme_set(theme_minimal())
+```
+
+# 1. Introduction: Why Linear Regression in Social Science?
+
+## 1.1 The Housing Crisis: A Motivating Example
+
+Across Europe, housing affordability has become a critical policy issue. Young
+adults stay with parents longer, families spend increasing portions of income on
+housing, and single-person households—once a sign of economic prosperity—now
+face particular financial strain. 
+
+These are not just statistics; they represent fundamental questions about
+quality of life, economic opportunity, and social policy. As social scientists,
+we need tools to understand these relationships quantitatively. Linear
+regression, despite its simplicity, remains one of the most powerful tools for
+this purpose.
+
+## 1.2 What Can Linear Regression Tell Us?
+
+Linear regression helps us answer questions like:
+
+- **How much** does housing cost overburden increase when immigration rises?
+- **Controlling for** economic factors like GDP, do single-person households face disproportionate housing costs?
+- **What portion** of housing stress can be attributed to different factors?
+
+However, linear regression also has limitations. It can tell us about
+**associations** but not necessarily **causation**. It assumes certain
+relationships that may not hold in complex social systems.
+
+## 1.3 Our Analysis Framework
+
+We'll use 2023 data from Eurostat focusing on:
+- **Outcome variable**: Housing cost overburden rate (`hc_overburden`)
+- **Key predictors**: Immigration rates and single-person households
+- **Control variables**: GDP per capita, population, inflation (HICP)
+
+Let's load our data:
+
+```{r load-data}
+# Load the processed data from our previous work
+# This assumes you've run the housing-crisis.rmd file first
+combined_df <- read_csv("data/processed/combined_indices.csv", show_col_types = FALSE)
+
+# Filter to 2023 data only
+# We use 2023 as it's the most recent complete year
+data_2023 <- combined_df |>
+  filter(year == 2023) |>
+  # Remove any rows with missing values in our key variables
+  # This is called "complete case analysis"
+  filter(
+    !is.na(hc_overburden),
+    !is.na(one_person_hh_per_capita),
+    !is.na(gdp_per_capita),
+    !is.na(hicp_index),
+    !is.na(population)
+  )
+
+# Check how many countries we have
+n_countries <- n_distinct(data_2023$geo)
+print(paste("Number of countries in 2023 analysis:", n_countries))
+
+# View the first few rows
+head(data_2023)
+```
+
+# 2. Understanding Your Data: Predictor Distributions
+
+## 2.1 The Myth of Normal Predictors
+
+One of the most persistent misconceptions in regression analysis is that predictor variables must be normally distributed. This is **false**. Linear regression requires normally distributed **residuals** (errors), not predictors.
+
+Let's examine our predictors:
+
+```{r examine-predictors}
+# Create a function to plot distributions
+# This function will help us visualize each variable consistently
+plot_distribution <- function(data, variable, title) {
+  # Create both histogram and density plot
+  ggplot(data, aes(x = .data[[variable]])) +
+    # Histogram with density scaling
+    geom_histogram(
+      aes(y = after_stat(density)),
+      bins = 20,
+      fill = "lightblue",
+      color = "black",
+      alpha = 0.7
+    ) +
+    # Overlay density curve
+    geom_density(
+      color = "darkblue",
+      linewidth = 1.2
+    ) +
+    # Add vertical line at mean
+    geom_vline(
+      xintercept = mean(data[[variable]], na.rm = TRUE),
+      color = "red",
+      linetype = "dashed",
+      linewidth = 1
+    ) +
+    labs(
+      title = title,
+      x = variable,
+      y = "Density"
+    ) +
+    theme_minimal()
+}
+
+# Examine each predictor's distribution
+p1 <- plot_distribution(data_2023, "gdp_per_capita", "GDP per Capita Distribution")
+p2 <- plot_distribution(data_2023, "one_person_hh_per_capita", "Single-Person Households")
+p3 <- plot_distribution(data_2023, "hicp_index", "Inflation Index (HICP)")
+p4 <- plot_distribution(data_2023, "hc_overburden", "Housing Cost Overburden (Outcome)")
+
+# Combine plots using patchwork
+(p1 + p2) / (p3 + p4) +
+  plot_annotation(
+    title = "Distribution of Variables in Housing Analysis",
+    subtitle = "Note the different shapes - this is perfectly fine for regression!"
+  )
+```
+
+## 2.2 Why These Distributions Matter (And Why They Don't)
+
+Looking at our variables:
+
+1. **GDP per Capita**: Right-skewed (typical for income/wealth data)
+   - A few wealthy countries pull the distribution right
+   - This creates "high leverage" points in regression
+
+2. **Single-Person Households**: Roughly symmetric
+   - Easier to interpret in models
+   - Less concern about extreme values
+
+3. **Inflation Index**: Clustered with some outliers
+   - Reflects economic shocks differently across countries
+
+4. **Housing Overburden**: Right-skewed with many low values
+   - Most countries have moderate rates
+   - A few have severe problems
+
+### The Key Insight
+
+These non-normal distributions don't invalidate our regression! What matters is:
+- The **relationship** between predictors and outcome
+- The distribution of **residuals** after fitting
+- Whether extreme values unduly influence results
+
+## 2.3 When to Transform Variables
+
+Sometimes transformations help, but they change interpretation:
+
+```{r demonstrate-transformations, fig.width = 10, fig.height= 8}
+# Create a dataset with original and transformed variables
+data_transformed <- data_2023 |>
+  mutate(
+    # Log transformation for GDP
+    # We use log10 for easier interpretation (orders of magnitude)
+    log_gdp = log10(gdp_per_capita),
+    
+    # Square root transformation for percentages
+    # This can help with right-skewed percentage data
+    sqrt_overburden = sqrt(hc_overburden),
+    
+    # Standardization (z-scores) for comparison
+    # This puts all variables on the same scale
+    z_gdp = scale(gdp_per_capita)[,1],
+    z_households = scale(one_person_hh_per_capita)[,1]
+  )
+
+# Demonstrate the effect of log transformation on GDP
+p_original <- ggplot(data_transformed, aes(x = gdp_per_capita, y = hc_overburden)) +
+  geom_point(size = 3, alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE, color = "red") +
+  labs(
+    title = "Original Scale",
+    subtitle = "Note the clustering on the left",
+    x = "GDP per Capita (€)",
+    y = "Housing Overburden (%)"
+  ) +
+  scale_x_continuous(labels = comma)
+
+p_logged <- ggplot(data_transformed, aes(x = log_gdp, y = hc_overburden)) +
+  geom_point(size = 3, alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE, color = "blue") +
+  labs(
+    title = "Log-Transformed GDP",
+    subtitle = "Relationship appears more linear",
+    x = "log₁₀(GDP per Capita)",
+    y = "Housing Overburden (%)"
+  )
+
+# Display side by side
+p_original + p_logged +
+  plot_annotation(
+    title = "Effect of Log Transformation on GDP-Housing Relationship",
+    subtitle = "Log transformation spreads out the clustered values"
+  )
+```
+
+### Interpretation Changes with Transformation
+
+| Transformation | Model | Interpretation |
+|----------------|-------|----------------|
+| None | Y ~ X | 1-unit ↑ in X → β change in Y |
+| Log predictor | Y ~ log(X) | 1% ↑ in X → β/100 change in Y |
+| Log outcome | log(Y) ~ X | 1-unit ↑ in X → 100β% change in Y |
+| Both logged | log(Y) ~ log(X) | 1% ↑ in X → β% change in Y |
+
+## 2.4 Practical Recommendations for Social Science Data
+
+```{r practical-demo}
+# Let's examine if transformation helps our specific case
+# Fit models with and without transformation
+model_original <- lm(hc_overburden ~ gdp_per_capita + one_person_hh_per_capita, 
+                    data = data_2023)
+
+model_log_gdp <- lm(hc_overburden ~ log10(gdp_per_capita) + one_person_hh_per_capita, 
+                   data = data_2023)
+
+# Compare R-squared values
+r2_original <- summary(model_original)$r.squared
+r2_logged <- summary(model_log_gdp)$r.squared
+
+# Create a comparison table
+comparison <- tibble(
+  Model = c("Original GDP", "Log GDP"),
+  R_squared = c(r2_original, r2_logged),
+  Interpretation = c(
+    "€1,000 increase in GDP → effect on overburden",
+    "10% increase in GDP → effect on overburden"
+  )
+)
+
+print(comparison)
+```
+
+### When to Transform in Practice:
+
+1. **Transform when**:
+   - Variables span multiple orders of magnitude (e.g., GDP: €10,000 to €100,000+)
+   - Theory suggests multiplicative relationships
+   - Residual plots show problems (we'll see this in Section 3)
+
+2. **Keep original scale when**:
+   - Interpretation is clearer
+   - Differences are more meaningful than ratios
+   - Stakeholders understand absolute changes better
+
+3. **For housing analysis specifically**:
+   - GDP often benefits from log transformation
+   - Percentages (like overburden rate) usually stay untransformed
+   - Count data might need special handling
+
+## 2.5 Summary: What Actually Matters
+
+The key takeaways for your analysis:
+
+1. **Predictor distributions don't need to be normal** - stop worrying about this!
+2. **Extreme values (outliers) do matter** - they can heavily influence results
+3. **Transformations are tools, not requirements** - use them when they help interpretation or model fit
+4. **Always think about interpretation** - a better-fitting model that's incomprehensible helps no one
+
+In the next section, we'll examine what assumptions DO matter - particularly the
+linearity assumption - and how to check them with your housing data.
+
+# 3. The Linearity Assumption: What It Really Means
+
+## 3.1 Understanding Linearity
+
+The linearity assumption is perhaps the most misunderstood aspect of linear
+regression. It does NOT mean your data points must fall on a straight line.
+Instead, it means:
+
+**The residuals (errors) should have a mean of zero across all values of the *predictors.**
+
+In practical terms: the model shouldn't systematically over-predict or
+under-predict at different levels of your predictors.
+
+### Why This Matters for Policy Analysis
+
+If linearity is violated:
+- Your estimates are **biased** - they systematically miss the true relationship
+- You might conclude "no effect" when there's actually a strong non-linear
+effect
+- Policy recommendations based on the model could be wrong
+
+Let's fit a model and examine this assumption:
+
+```{r fit-housing-model}
+# For this demonstration, we'll create a simplified model first
+# Note: In practice, we'd need immigration data. For now, we'll use 
+# population density as a proxy for urbanization/immigration pressure
+data_2023 <- data_2023 |>
+  mutate(
+    # Create population density as a rough proxy
+    # This is just for demonstration - real analysis needs actual immigration
+    # data
+    pop_density_proxy = population / 1000  # Simplified measure
+  )
+
+# Fit our main model
+# Housing overburden as a function of single-person households and our proxy
+model_housing <- lm(
+  hc_overburden ~ one_person_hh_per_capita + pop_density_proxy + 
+                  gdp_per_capita + hicp_index,
+  data = data_2023
+)
+
+# Display model summary
+summary(model_housing)
+
+# Add residuals and fitted values to our data
+# This is crucial for diagnostic plots
+data_2023 <- data_2023 |>
+  mutate(
+    # Fitted values: what the model predicts
+    fitted_values = fitted(model_housing),
+    
+    # Residuals: actual - predicted
+    residuals = residuals(model_housing),
+    
+    # Standardized residuals: easier to spot outliers
+    std_residuals = rstandard(model_housing)
+  )
+```
+
+## 3.2 Visual Diagnostics: The Key Tools
+
+### Residuals vs Fitted Values: The Most Important Plot
+
+This plot reveals whether the linearity assumption holds:
+
+```{r residuals-vs-fitted}
+# Create the main diagnostic plot
+p_resid_fitted <- ggplot(data_2023, aes(x = fitted_values, y = residuals)) +
+  # Add points with some transparency
+  geom_point(alpha = 0.6, size = 3) +
+  
+  # Add horizontal reference line at y = 0
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed", linewidth = 1) +
+  
+  # Add a smooth line to show the average residual at each fitted value
+  # If linearity holds, this should be close to the red line
+  geom_smooth(method = "loess", se = TRUE, color = "blue", linewidth = 1) +
+  
+  # Labels
+  labs(
+    title = "Residuals vs Fitted Values",
+    subtitle = "Blue line should follow the red dashed line if linearity holds",
+    x = "Fitted Values (Predicted Housing Overburden %)",
+    y = "Residuals"
+  ) +
+  
+  # Add annotation explaining what to look for
+  annotate(
+    "text", 
+    x = max(data_2023$fitted_values) * 0.7, 
+    y = max(data_2023$residuals) * 0.8,
+    label = "Look for:\n• Horizontal spread\n• Blue line near red\n• No patterns",
+    hjust = 0,
+    size = 3.5,
+    color = "darkgray"
+  )
+
+# Create a companion plot showing what violations look like
+# Generate example data with non-linear relationship
+set.seed(123)
+n_example <- 100
+example_data <- tibble(
+  x = runif(n_example, 0, 10),
+  y_true = 5 + 2*x + 0.5*x^2,  # Quadratic relationship
+  y = y_true + rnorm(n_example, 0, 3)
+)
+
+# Fit linear model to non-linear data
+model_bad <- lm(y ~ x, data = example_data)
+example_data$residuals <- residuals(model_bad)
+example_data$fitted <- fitted(model_bad)
+
+p_violation <- ggplot(example_data, aes(x = fitted, y = residuals)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  geom_smooth(method = "loess", se = TRUE, color = "blue") +
+  labs(
+    title = "Example: Clear Violation of Linearity",
+    subtitle = "U-shaped pattern indicates missing quadratic term",
+    x = "Fitted Values",
+    y = "Residuals"
+  )
+
+# Display both plots
+p_resid_fitted + p_violation +
+  plot_annotation(
+    title = "Checking the Linearity Assumption",
+    subtitle = "Left: Your housing model | Right: What a violation looks like"
+  )
+```
+
+### Residuals vs Each Predictor
+
+We must also check residuals against each predictor individually:
+
+```{r residuals-vs-predictors}
+# Function to create residual plots for each predictor
+check_predictor_linearity <- function(data, predictor_name, predictor_label) {
+  ggplot(data, aes(x = .data[[predictor_name]], y = residuals)) +
+    geom_point(alpha = 0.5) +
+    geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+    geom_smooth(method = "loess", se = TRUE, color = "blue") +
+    labs(
+      title = paste("Residuals vs", predictor_label),
+      x = predictor_label,
+      y = "Residuals"
+    )
+}
+
+# Check each predictor
+p1 <- check_predictor_linearity(data_2023, "one_person_hh_per_capita", "Single-Person Households")
+p2 <- check_predictor_linearity(data_2023, "gdp_per_capita", "GDP per Capita") +
+  scale_x_continuous(labels = comma)
+p3 <- check_predictor_linearity(data_2023, "pop_density_proxy", "Population Density")
+p4 <- check_predictor_linearity(data_2023, "hicp_index", "Inflation Index")
+
+# Combine all plots
+(p1 + p2) / (p3 + p4) +
+  plot_annotation(
+    title = "Checking Linearity for Each Predictor",
+    subtitle = "Look for horizontal blue lines around zero"
+  )
+```
+
+## 3.3 Interpreting the Diagnostics
+
+### What We're Looking For:
+
+1. **Good (Linearity holds)**:
+   - Residuals scattered randomly around zero
+   - Blue smoothed line stays close to red dashed line
+   - No clear patterns (U-shapes, curves, fans)
+
+2. **Problems to spot**:
+   - **Curvature**: Suggests polynomial terms needed
+   - **Increasing spread**: Heteroscedasticity (different topic)
+   - **Clusters**: Might indicate groups in your data
+
+### Common Patterns in Social Science Data:
+
+```{r demonstrate-patterns}
+# Create educational examples of common problems
+set.seed(456)
+n_demo <- 200
+
+# Generate different problematic patterns
+demo_data <- tibble(
+  # Pattern 1: Threshold effect (common in policy)
+  x1 = runif(n_demo, 0, 100),
+  y1 = ifelse(x1 < 50, 10 + 0.1*x1, 15 + 0.3*x1) + rnorm(n_demo, 0, 2),
+  
+  # Pattern 2: Diminishing returns (common in economics)
+  x2 = runif(n_demo, 1, 100),
+  y2 = 20 * log(x2) + rnorm(n_demo, 0, 3),
+  
+  # Pattern 3: Excluded group (common in social data)
+  group = sample(c("A", "B"), n_demo, replace = TRUE),
+  x3 = runif(n_demo, 0, 50),
+  y3 = ifelse(group == "A", 10 + 0.5*x3, 25 + 0.5*x3) + rnorm(n_demo, 0, 2)
+)
+
+# Fit linear models (incorrectly)
+mod1 <- lm(y1 ~ x1, data = demo_data)
+mod2 <- lm(y2 ~ x2, data = demo_data)
+mod3 <- lm(y3 ~ x3, data = demo_data)  # Ignoring group
+
+# Add residuals
+demo_data <- demo_data |>
+  mutate(
+    resid1 = residuals(mod1),
+    resid2 = residuals(mod2),
+    resid3 = residuals(mod3)
+  )
+
+# Create plots showing these patterns
+p_threshold <- ggplot(demo_data, aes(x = x1, y = resid1)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  geom_smooth(method = "loess", color = "blue") +
+  geom_vline(xintercept = 50, color = "darkgreen", linetype = "dotted") +
+  labs(
+    title = "Threshold Effect",
+    subtitle = "Policy changes at x=50",
+    x = "Policy Variable", y = "Residuals"
+  )
+
+p_diminishing <- ggplot(demo_data, aes(x = x2, y = resid2)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  geom_smooth(method = "loess", color = "blue") +
+  labs(
+    title = "Diminishing Returns",
+    subtitle = "Need log transformation",
+    x = "Economic Input", y = "Residuals"
+  )
+
+p_groups <- ggplot(demo_data, aes(x = x3, y = resid3, color = group)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  geom_smooth(method = "loess", aes(group = 1), color = "blue") +
+  labs(
+    title = "Hidden Groups",
+    subtitle = "Missing group variable",
+    x = "Predictor", y = "Residuals"
+  ) +
+  theme(legend.position = "bottom")
+
+# Display pattern examples
+p_threshold + p_diminishing + p_groups +
+  plot_annotation(
+    title = "Common Linearity Violations in Social Science",
+    subtitle = "Each requires a different solution"
+  )
+```
+
+## 3.4 Solutions for Linearity Violations
+
+### 1. Polynomial Terms
+
+When relationships curve, add polynomial terms:
+
+```{r polynomial-solution}
+# Let's say GDP shows curvature (common for economic variables)
+# Fit model with quadratic term
+model_quadratic <- lm(
+  hc_overburden ~ one_person_hh_per_capita + pop_density_proxy + 
+                  gdp_per_capita + I(gdp_per_capita^2) + hicp_index,
+  data = data_2023
+)
+
+# Compare models
+anova(model_housing, model_quadratic)
+
+# Visualize the difference
+pred_linear <- predict(model_housing)
+pred_quadratic <- predict(model_quadratic)
+
+comparison_df <- data_2023 |>
+  mutate(
+    pred_linear = pred_linear,
+    pred_quadratic = pred_quadratic
+  ) |>
+  select(gdp_per_capita, hc_overburden, pred_linear, pred_quadratic) |>
+  pivot_longer(
+    cols = c(pred_linear, pred_quadratic),
+    names_to = "model",
+    values_to = "prediction"
+  )
+
+ggplot(comparison_df, aes(x = gdp_per_capita)) +
+  geom_point(aes(y = hc_overburden), alpha = 0.5) +
+  geom_line(aes(y = prediction, color = model), size = 1.2) +
+  scale_color_manual(
+    values = c("pred_linear" = "red", "pred_quadratic" = "blue"),
+    labels = c("Linear", "Quadratic")
+  ) +
+  labs(
+    title = "Linear vs Quadratic Model for GDP Effect",
+    x = "GDP per Capita",
+    y = "Housing Overburden %"
+  ) +
+  scale_x_continuous(labels = comma)
+```
+
+### 2. Transformations (Revisited)
+
+Sometimes transforming variables solves linearity issues:
+
+```{r transformation-solution}
+# Compare residual plots with and without log GDP
+model_log <- lm(
+  hc_overburden ~ one_person_hh_per_capita + pop_density_proxy + 
+                  log10(gdp_per_capita) + hicp_index,
+  data = data_2023
+)
+
+# Add residuals from log model
+data_2023$resid_log <- residuals(model_log)
+
+# Compare residual patterns
+p_orig <- ggplot(data_2023, aes(x = gdp_per_capita, y = residuals)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  geom_smooth(method = "loess", color = "blue") +
+  labs(title = "Original Scale", x = "GDP per Capita", y = "Residuals") +
+  scale_x_continuous(labels = comma)
+
+p_log <- ggplot(data_2023, aes(x = gdp_per_capita, y = resid_log)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  geom_smooth(method = "loess", color = "blue") +
+  labs(title = "With Log(GDP)", x = "GDP per Capita", y = "Residuals") +
+  scale_x_continuous(labels = comma)
+
+p_orig + p_log +
+  plot_annotation(
+    title = "How Transformation Can Improve Linearity",
+    subtitle = "Log transformation often helps with economic variables"
+  )
+```
+
+### 3. Including Interaction Terms
+
+When effects differ by group:
+
+```{r interaction-solution}
+# Perhaps the effect of single-person households depends on GDP level
+# Rich vs poor countries might show different patterns
+model_interaction <- lm(
+  hc_overburden ~ one_person_hh_per_capita * log10(gdp_per_capita) + 
+                  pop_density_proxy + hicp_index,
+  data = data_2023
+)
+
+# Visualize interaction effect
+# Create predictions at different GDP levels
+gdp_levels <- quantile(data_2023$gdp_per_capita, c(0.25, 0.75))
+pred_data <- expand_grid(
+  one_person_hh_per_capita = seq(
+    min(data_2023$one_person_hh_per_capita),
+    max(data_2023$one_person_hh_per_capita),
+    length.out = 100
+  ),
+  gdp_per_capita = gdp_levels,
+  pop_density_proxy = mean(data_2023$pop_density_proxy),
+  hicp_index = mean(data_2023$hicp_index)
+)
+
+pred_data$prediction <- predict(model_interaction, newdata = pred_data)
+
+ggplot(pred_data, aes(x = one_person_hh_per_capita, y = prediction)) +
+  geom_line(aes(color = factor(round(gdp_per_capita))), size = 1.2) +
+  labs(
+    title = "Interaction Effect: How GDP Modifies the Housing Burden Relationship",
+    subtitle = "Different slopes for different GDP levels suggest interaction",
+    x = "Single-Person Households (per capita)",
+    y = "Predicted Housing Overburden %",
+    color = "GDP per Capita"
+  ) +
+  scale_color_manual(
+    values = c("darkblue", "darkred"),
+    labels = c("Low GDP", "High GDP")
+  )
+```
+
+## 3.5 Practical Guidelines for Your Analysis
+
+### When to Worry About Linearity:
+
+1. **Clear patterns in residual plots** - not just minor wiggles
+2. **Theoretical reason** to expect non-linearity (e.g., diminishing returns)
+3. **Substantial improvement** in model fit with solutions
+
+### When NOT to Worry:
+
+1. **Small deviations** with few data points
+2. **No theoretical basis** for complex relationships
+3. **Minimal change** in conclusions with different specifications
+
+### A Decision Framework:
+
+```{r decision-framework}
+# Create a simple decision tree visualization
+decision_data <- tibble(
+  step = c("1. Check Residual Plots", 
+           "2. Clear Pattern?", 
+           "3. Theory Suggests Non-linearity?",
+           "4. Try Solutions",
+           "5. Substantially Better?",
+           "No Action Needed",
+           "Use Modified Model"),
+  x = c(0, -1, 1, 0, 0, -1.5, 1.5),
+  y = c(4, 3, 3, 2, 1, 0, 0),
+  label_color = c(rep("black", 5), "darkgreen", "darkblue")
+)
+
+ggplot(decision_data, aes(x = x, y = y)) +
+  geom_point(size = 10, aes(color = label_color)) +
+  geom_text(aes(label = step), size = 3.5, hjust = 0.5) +
+  geom_segment(aes(x = 0, y = 3.8, xend = -1, yend = 3.2), 
+               arrow = arrow(length = unit(0.2, "cm"))) +
+  geom_segment(aes(x = 0, y = 3.8, xend = 1, yend = 3.2), 
+               arrow = arrow(length = unit(0.2, "cm"))) +
+  geom_segment(aes(x = -1, y = 2.8, xend = -1.5, yend = 0.2), 
+               arrow = arrow(length = unit(0.2, "cm"))) +
+  geom_segment(aes(x = 1, y = 2.8, xend = 0, yend = 2.2), 
+               arrow = arrow(length = unit(0.2, "cm"))) +
+  geom_segment(aes(x = 0, y = 1.8, xend = 0, yend = 1.2), 
+               arrow = arrow(length = unit(0.2, "cm"))) +
+  geom_segment(aes(x = 0, y = 0.8, xend = 1.5, yend = 0.2), 
+               arrow = arrow(length = unit(0.2, "cm"))) +
+  scale_color_identity() +
+  theme_void() +
+  labs(title = "Decision Framework for Addressing Linearity Violations") +
+  coord_cartesian(xlim = c(-2, 2), ylim = c(-0.5, 4.5))  
+```
+
+## 3.6 Summary and Next Steps
+
+Key takeaways for checking linearity:
+
+1. **Always create residual plots** - they're more informative than any test
+2. **Check against fitted values AND each predictor**
+3. **Look for patterns, not perfection**
+4. **Consider practical significance** - small violations might not matter
+5. **Document your choices** - explain why you did (or didn't) modify the model
+
+Remember: The goal isn't a perfect model, but one that's adequate for your research question. For policy analysis, it's better to acknowledge limitations than to over-complicate the model.
+
+In the next section, we'll explore what we can and cannot learn from cross-sectional data, and why your choice to use only 2023 data has important implications.
+
+# 4. Cross-Sectional Analysis: Strengths and Limitations
+
+## 4.1 What Is Cross-Sectional Data?
+
+Cross-sectional data captures a **snapshot in time** - like taking a photograph of all European countries on December 31, 2023. Every country appears once, at the same time point.
+
+```{r visualize-cross-section}
+# Visualize what cross-sectional means vs. time series
+# Create example data to illustrate the concept
+example_countries <- c("Germany", "France", "Poland", "Spain", "Czechia")
+years <- 2019:2023
+
+# Time series data (what we have)
+time_series_example <- expand_grid(
+  country = example_countries,
+  year = years
+) |>
+  mutate(
+    housing_burden = 10 + rnorm(n(), 0, 2) + 
+                     (year - 2019) * runif(n(), 0.5, 1.5)  # Trending up
+  )
+
+# Cross-sectional data (what you're using)
+cross_section_example <- time_series_example |>
+  filter(year == 2023)
+
+# Visualize the difference
+p_time_series <- ggplot(time_series_example, 
+                        aes(x = year, y = housing_burden, color = country)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  labs(
+    title = "Time Series Data: Multiple Observations per Country",
+    subtitle = "Shows trends and changes over time",
+    x = "Year", 
+    y = "Housing Burden %"
+  ) +
+  theme(legend.position = "bottom")
+
+p_cross_section <- ggplot(cross_section_example, 
+                          aes(x = country, y = housing_burden, fill = country)) +
+  geom_col() +
+  labs(
+    title = "Cross-Sectional Data: One Observation per Country",
+    subtitle = "Shows differences between countries at one point",
+    x = "Country", 
+    y = "Housing Burden % (2023 only)"
+  ) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+p_time_series + p_cross_section +
+  plot_annotation(
+    title = "Time Series vs Cross-Sectional Data",
+    subtitle = "Your analysis uses only the 2023 'snapshot'"
+  )
+```
+
+## 4.2 What Can We Learn from Cross-Sectional Data?
+
+### Associations and Correlations
+
+Cross-sectional analysis excels at finding **associations** between variables:
+
+```{r cross-sectional-insights}
+# Demonstrate what we CAN learn
+# Create a clear association in 2023 data
+ggplot(data_2023, aes(x = log10(gdp_per_capita), y = hc_overburden)) +
+  geom_point(size = 3, alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(
+    title = "Cross-Sectional Association: GDP and Housing Burden (2023)",
+    subtitle = "Wealthier countries tend to have lower housing burden",
+    x = "Log GDP per Capita",
+    y = "Housing Cost Overburden %"
+  ) +
+  # Add correlation info
+  annotate(
+    "text",
+    x = max(log10(data_2023$gdp_per_capita)) * 0.9,
+    y = max(data_2023$hc_overburden) * 0.9,
+    label = paste("Correlation:", round(cor(log10(data_2023$gdp_per_capita), 
+                                           data_2023$hc_overburden), 2)),
+    size = 5,
+    color = "darkblue"
+  )
+
+# Key insight box
+cat("WHAT WE CAN SAY:\n")
+cat("✓ In 2023, countries with higher GDP tend to have lower housing burden\n")
+cat("✓ The relationship is moderately strong (correlation ≈ -0.5)\n")
+cat("✓ This pattern exists across European countries\n\n")
+
+cat("WHAT WE CANNOT SAY:\n")
+cat("✗ Increasing GDP CAUSES housing burden to decrease\n")
+cat("✗ This relationship has always existed\n")
+cat("✗ This relationship will persist in the future\n")
+```
+
+### Comparative Analysis
+
+Cross-sectional data is excellent for **comparing** units at a point in time:
+
+```{r comparative-analysis}
+# Identify interesting groups in the data
+data_2023_grouped <- data_2023 |>
+  mutate(
+    # Create GDP groups for comparison
+    gdp_group = case_when(
+      gdp_per_capita < quantile(gdp_per_capita, 0.33) ~ "Low GDP",
+      gdp_per_capita < quantile(gdp_per_capita, 0.67) ~ "Medium GDP",
+      TRUE ~ "High GDP"
+    )
+  )
+
+# Compare housing burden across GDP groups
+comparison_plot <- ggplot(data_2023_grouped, 
+                          aes(x = gdp_group, y = hc_overburden)) +
+  geom_boxplot(aes(fill = gdp_group), alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  labs(
+    title = "Housing Burden by Economic Development Level (2023)",
+    subtitle = "Cross-sectional comparison reveals group differences",
+    x = "GDP Group",
+    y = "Housing Cost Overburden %"
+  ) +
+  scale_fill_manual(values = c("Low GDP" = "#d73027", 
+                              "Medium GDP" = "#fee08b", 
+                              "High GDP" = "#1a9850")) +
+  theme(legend.position = "none")
+
+# Statistical comparison
+group_stats <- data_2023_grouped |>
+  group_by(gdp_group) |>
+  summarise(
+    mean_burden = mean(hc_overburden),
+    sd_burden = sd(hc_overburden),
+    n = n()
+  )
+
+comparison_plot +
+  annotate(
+    "table",
+    x = 2.5, y = max(data_2023$hc_overburden) * 0.8,
+    label = list(group_stats),
+    size = 3
+  )
+
+print(group_stats)
+```
+
+## 4.3 The Advantages of Using Only 2023 Data
+
+Using a single year has some benefits:
+
+### 1. Simplicity and Clarity
+
+```{r advantage-simplicity}
+# Your model is straightforward to interpret
+model_2023 <- lm(hc_overburden ~ one_person_hh_per_capita + gdp_per_capita, 
+                 data = data_2023)
+
+# Clean, simple output
+summary(model_2023)
+
+# Create interpretation helper
+coef_interp <- tibble(
+  Variable = c("Single-Person Households", "GDP per Capita"),
+  Coefficient = coef(model_2023)[2:3],
+  Interpretation = c(
+    "1 unit increase → housing burden changes by this much",
+    "€1,000 increase → housing burden changes by this much"
+  )
+)
+
+print(coef_interp)
+```
+
+### 2. No Time-Related Complications
+
+- **No autocorrelation**: Observations are independent
+- **No trends to model**: Don't need to worry about time trends
+- **Current relevance**: Results reflect the most recent situation
+
+### 3. Computational Simplicity
+
+With your current knowledge (`lm()` command), cross-sectional analysis is feasible:
+
+```{r feasibility-demo}
+# What you CAN do with lm() and cross-sectional data
+models_you_can_fit <- tribble(
+  ~Model_Type, ~Example, ~Feasible,
+  "Simple Linear", "lm(y ~ x1 + x2)", "✓ Yes",
+  "With Interactions", "lm(y ~ x1 * x2)", "✓ Yes",
+  "Polynomial Terms", "lm(y ~ x + I(x^2))", "✓ Yes",
+  "Panel Data Models", "plm(y ~ x + factor(country))", "✗ No - need plm package",
+  "Time Series", "arima(y ~ x)", "✗ No - need time series methods",
+  "Causal Inference", "iv(y ~ x | instrument)", "✗ No - need advanced methods"
+)
+
+print(models_you_can_fit)
+```
+
+## 4.4 Problems with Cross-Sectional Analysis (Ordered by Severity)
+
+### 🔴 Problem 1: Cannot Establish Causation (MOST SEVERE)
+
+This is the **biggest limitation**. Cross-sectional data shows correlation, not causation:
+
+```{r causation-problem}
+# Demonstrate the causation problem with a concrete example
+# Spurious correlation example
+set.seed(789)
+spurious_data <- data_2023 |>
+  mutate(
+    # Create a confounding variable (economic development)
+    development_index = scale(gdp_per_capita)[,1] + rnorm(n(), 0, 0.5),
+    
+    # Both ice cream sales and swimming pools correlate with development
+    ice_cream_sales = 50 + 20 * development_index + rnorm(n(), 0, 5),
+    swimming_pools = 10 + 15 * development_index + rnorm(n(), 0, 3)
+  )
+
+# Show spurious correlation
+p_spurious <- ggplot(spurious_data, aes(x = ice_cream_sales, y = swimming_pools)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(
+    title = "Spurious Correlation in Cross-Sectional Data",
+    subtitle = "Ice cream doesn't cause swimming pools - both reflect wealth!",
+    x = "Ice Cream Sales (per capita)",
+    y = "Swimming Pools (per 1000 people)"
+  )
+
+# The real relationships
+p_real1 <- ggplot(spurious_data, aes(x = development_index, y = ice_cream_sales)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "True Cause: Development → Ice Cream", 
+       x = "Development", y = "Ice Cream")
+
+p_real2 <- ggplot(spurious_data, aes(x = development_index, y = swimming_pools)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "True Cause: Development → Pools", 
+       x = "Development", y = "Swimming Pools")
+
+p_spurious / (p_real1 + p_real2) +
+  plot_annotation(
+    title = "The Causation Problem: Hidden Common Causes",
+    subtitle = "Cross-sectional data cannot distinguish correlation from causation"
+  )
+```
+
+**Why this matters for policy:**
+- You might recommend reducing single-person households to lower housing burden
+- But what if both are caused by urbanization?
+- Policy intervention might have no effect!
+
+### 🟠 Problem 2: Cannot Detect Changes or Trends (SEVERE)
+
+You miss how relationships evolve:
+
+```{r trends-problem}
+# Simulate how a relationship might change over time
+trend_example <- expand_grid(
+  year = 2015:2023,
+  country = c("A", "B", "C", "D", "E")
+) |>
+  mutate(
+    x = runif(n(), 0, 100),
+    # Relationship changes over time
+    effect = case_when(
+      year <= 2019 ~ 0.5,   # Weak positive before COVID
+      year == 2020 ~ 0,     # No effect during COVID
+      year >= 2021 ~ -0.3   # Negative after COVID
+    ),
+    y = 20 + effect * x + rnorm(n(), 0, 5)
+  )
+
+# Show changing relationship
+p_changing <- ggplot(trend_example, aes(x = x, y = y)) +
+  geom_point(aes(color = factor(year)), alpha = 0.6) +
+  geom_smooth(method = "lm", aes(color = factor(year)), se = FALSE) +
+  facet_wrap(~year, nrow = 3) +
+  labs(
+    title = "Relationships Can Change Over Time",
+    subtitle = "Cross-sectional analysis of 2023 misses this entirely",
+    x = "Policy Variable",
+    y = "Outcome"
+  ) +
+  theme(legend.position = "none")
+
+# What you see with only 2023
+p_2023_only <- trend_example |>
+  filter(year == 2023) |>
+  ggplot(aes(x = x, y = y)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(
+    title = "What You See: Only 2023",
+    subtitle = "Negative relationship",
+    x = "Policy Variable",
+    y = "Outcome"
+  )
+
+p_changing + p_2023_only +
+  plot_annotation(
+    title = "Missing Temporal Dynamics",
+    subtitle = "A relationship that changed from positive to negative"
+  )
+```
+
+### 🟡 Problem 3: Reverse Causation (MODERATE)
+
+Does X cause Y, or does Y cause X?
+
+```{r reverse-causation}
+# Housing example of reverse causation
+reverse_example <- data_2023 |>
+  select(geo, hc_overburden, one_person_hh_per_capita)
+
+# Model 1: Single households → Housing burden
+model_forward <- lm(hc_overburden ~ one_person_hh_per_capita, data = reverse_example)
+
+# Model 2: Housing burden → Single households (reverse)
+model_reverse <- lm(one_person_hh_per_capita ~ hc_overburden, data = reverse_example)
+
+# Both models "work"!
+cat("Forward Model: Single Households → Housing Burden\n")
+cat("R-squared:", round(summary(model_forward)$r.squared, 3), "\n\n")
+
+cat("Reverse Model: Housing Burden → Single Households\n")
+cat("R-squared:", round(summary(model_reverse)$r.squared, 3), "\n\n")
+
+cat("PROBLEM: Both directions seem plausible!\n")
+cat("- High housing costs might force people to live alone (can't afford family homes)\n")
+cat("- OR more single households might drive up housing demand and costs\n")
+cat("- Cross-sectional data cannot tell us which is true!\n")
+```
+
+### 🟡 Problem 4: Selection Bias (MODERATE)
+
+Your 2023 snapshot might catch countries at unusual times:
+
+```{r selection-bias}
+# Example: Some countries might have temporary policies in 2023
+selection_example <- data_2023 |>
+  mutate(
+    # Simulate temporary rent control in some countries
+    temp_policy = geo %in% c("DE", "FR", "ES"),
+    adjusted_burden = ifelse(temp_policy, 
+                            hc_overburden * 0.8,  # 20% reduction
+                            hc_overburden)
+  )
+
+ggplot(selection_example, aes(x = one_person_hh_per_capita, y = adjusted_burden)) +
+  geom_point(aes(color = temp_policy), size = 3) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(
+    title = "Selection Bias: 2023 Might Be Special",
+    subtitle = "Some countries have temporary policies affecting the relationship",
+    x = "Single-Person Households",
+    y = "Housing Burden (2023 with temp policies)",
+    color = "Rent Control\nin 2023?"
+  ) +
+  scale_color_manual(values = c("FALSE" = "gray50", "TRUE" = "red"))
+```
+
+### 🟢 Problem 5: Missing Dynamics (MINOR)
+
+Can't study adjustment processes:
+
+```{r dynamics-problem}
+# Create simple illustration
+cat("Examples of Dynamics You Miss:\n\n")
+cat("1. POLICY LAGS:\n")
+cat("   - New housing policy implemented in 2022\n")
+cat("   - Effects might not show until 2024-2025\n")
+cat("   - Your 2023 snapshot sees neither cause nor effect\n\n")
+
+cat("2. CYCLICAL PATTERNS:\n")
+cat("   - Housing markets have boom-bust cycles\n")
+cat("   - 2023 might be peak or trough\n")
+cat("   - Cross-sectional analysis assumes this is 'normal'\n\n")
+
+cat("3. ADAPTATION:\n")
+cat("   - People adjust behavior over time\n")
+cat("   - Short-term vs long-term responses differ\n")
+cat("   - One snapshot can't capture this\n")
+```
+
+## 4.5 What Would Panel/Time Series Add?
+
+With more advanced methods and multiple years, you could:
+
+```{r panel-benefits}
+# Create visualization of panel data benefits
+panel_benefits <- tribble(
+  ~Method, ~What_It_Does, ~Example, ~Feasible_Now,
+  "Fixed Effects", "Control for country-specific factors", "Some countries always have high burden", "No",
+  "First Differences", "Focus on changes, not levels", "What happens when GDP increases?", "No",
+  "Lag Variables", "X affects Y later", "Today's policy → Tomorrow's outcome", "No",
+  "Granger Causality", "Test if X predicts future Y", "Do households predict future burden?", "No"
+)
+
+# Visualize as a table
+library(knitr)
+kable(panel_benefits, 
+      caption = "What You Could Do with Panel Data (But Can't with Cross-Section)")
+```
+
+## 4.6 Making the Most of Cross-Sectional Analysis
+
+Despite limitations, you can still produce valuable research:
+
+### 1. Be Honest About Limitations
+
+```{r good-practice}
+# Template for discussing results
+cat("GOOD PRACTICE - How to Write Up Your Results:\n\n")
+
+cat("'Our analysis finds a significant negative association between GDP per capita\n")
+cat("and housing cost overburden in European countries in 2023. Countries with\n")
+cat("10% higher GDP tend to have 2.3 percentage points lower housing burden.\n\n")
+
+cat("However, this cross-sectional analysis cannot establish causation. The\n")
+cat("association might reflect: (1) wealthier countries building more housing,\n")
+cat("(2) reverse causation where housing affordability attracts investment, or\n")
+cat("(3) common factors affecting both variables. Additionally, using only 2023\n")
+cat("data prevents us from examining trends or policy dynamics.'\n\n")
+
+cat("This is honest, clear, and scientifically rigorous!\n")
+```
+
+### 2. Focus on What You CAN Do Well
+
+- **Describe** current patterns thoroughly
+- **Compare** groups of countries
+- **Identify** associations that merit further study
+- **Generate** hypotheses for future research
+
+### 3. Use Strong Theory
+
+Since you can't test causation empirically, rely on theory:
+
+```{r theory-importance}
+# Visualize theory-driven analysis
+theory_dag <- tribble(
+  ~from, ~to, ~label,
+  "Economic Development", "Housing Supply", "enables construction",
+  "Economic Development", "Household Income", "increases wages",
+  "Housing Supply", "Housing Burden", "more supply → lower burden",
+  "Household Income", "Housing Burden", "higher income → lower burden",
+  "Single Households", "Housing Demand", "need more units",
+  "Housing Demand", "Housing Burden", "higher demand → higher burden"
+)
+
+cat("THEORETICAL FRAMEWORK:\n")
+cat("Even with cross-sectional data, strong theory helps interpretation\n\n")
+for(i in 1:nrow(theory_dag)) {
+  cat(sprintf("%s → %s (%s)\n", 
+              theory_dag$from[i], 
+              theory_dag$to[i], 
+              theory_dag$label[i]))
+}
+```
+
+## 4.7 Summary: Working Within Your Limits
+
+Cross-sectional analysis with 2023 data is like taking a single photograph of a marathon:
+- You see who's ahead **right now**
+- You can compare runners' techniques
+- You cannot see who's speeding up or slowing down
+- You don't know who will win
+
+**For your housing analysis:**
+- ✓ DO: Describe associations, compare countries, identify patterns
+- ✗ DON'T: Claim causation, predict future, assume stability
+- 💡 REMEMBER: Good science acknowledges limitations
+
+The key is to do cross-sectional analysis **well** rather than attempting complex methods poorly.

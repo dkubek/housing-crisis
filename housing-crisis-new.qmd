@@ -1,0 +1,361 @@
+# Housing Crisis
+
+## Install and Load Necessary Packages
+
+```{r}
+install.packages("tidyverse")
+install.packages("ggrepel")
+install.packages("reshape")
+install.packages("patchwork")
+
+library(tidyverse)
+library(ggrepel)
+library(reshape2)
+library(patchwork)
+library(readxl)
+```
+
+## Data Description
+
+### Data Explanation
+
+1.) Describe data source and dataset descriptions
+
+  - What do the numbers mean?
+
+  - How were the data collected?
+    - In Eurostat dataset description, how are these data collected? Are they derived from some other indices? Are they collected directly? Are they inferred from any other indicators?
+
+  - What subset of data has been chosen? Why?
+    - How can I filter the data from Eurostat (by which filters and options) to get the same results?
+
+  - What transformations of data have been done? *WHY?*
+
+  - What is the range of the data (i.e.) Can the numbers be from arbitrary range? Are they bounded? What do the extreme data mean
+  
+    * `overburden_rate`: Housing cost overburden rate by age, sex and poverty status
+
+      - Online data code: ilc_lvho07a 
+
+      - Filtered by:
+        - year: 2023
+        - (totals for all other parameters)
+
+
+    Metadata: https://ec.europa.eu/eurostat/cache/metadata/en/ilc_sieusilc.htm
+    Dataset: https://ec.europa.eu/eurostat/databrowser/view/ilc_lvho07a/default/table?lang=en
+      
+    * `one_person_household_2023`: Number of households by household composition, number of children and age of youngest child (1 000)
+
+      - Online data code: `lfst_hhnhtych`
+      - Filtered by
+        - `year`: 2023
+        - `hhcomp`: [HHC_22] Single adult without children
+        - (totals for all other parameters)
+
+      Dataset: https://ec.europa.eu/eurostat/databrowser/view/lfst_hhnhtych/default/table?lang=en
+      Metadata: https://ec.europa.eu/eurostat/cache/metadata/en/lfst_hh_esms.htm
+
+    * `total_households`: Number of households by household composition, number of children and age of youngest child (1 000)
+
+      - Online data code: `lfst_hhnhtych`
+      - Filtered by
+        - `year`: 2023
+        - `hhcomp`: [TOTAL] Total
+        - (totals for all other parameters)
+
+      Dataset: https://ec.europa.eu/eurostat/databrowser/view/lfst_hhnhtych/default/table?lang=en
+      Metadata: https://ec.europa.eu/eurostat/cache/metadata/en/lfst_hh_esms.htm
+
+    * `population_change_2023`: 
+
+      - Filtered by:
+        - `indic_de`: (net migration) index.
+        [CNMIGRATRT]Crude rate of net migration plus statistical adjustment
+      
+        > change in the number of persons per 1000 persons of average population: net migration (including statistical adjustment). The net migration plus adjustment is calculated as the difference between the total change and the natural change of the population
+
+      Dataset: https://ec.europa.eu/eurostat/databrowser/view/tps00019/default/table?lang=en
+      Metadata: https://ec.europa.eu/eurostat/cache/metadata/en/demo_gind_esms.htm
+
+    * `gdp_per_cap`: GDP per capita in PPS
+
+      - Online data code: tec00114
+      - Filtered by:
+        - year: `2023`
+        - (all other parameters kept at total)
+
+      Dataset: https://ec.europa.eu/eurostat/databrowser/view/tec00114/default/table?lang=en
+      Metadata: https://ec.europa.eu/eurostat/cache/metadata/en/prc_ppp_esms.htm
+    
+    * `gov_expenditure`: General government expenditure by function (COFOG)    
+
+      - Online data code: gov_10a_exp
+
+      - Filtered by: ???
+      
+        Dataset: https://ec.europa.eu/eurostat/databrowser/view/gov_10a_exp__custom_17012254/default/table?lang=en
+        Metadata: https://ec.europa.eu/eurostat/cache/metadata/en/gov_10a_exp_esms.htm
+    
+    * `hicp_avg`: HICP - monthly data (index)
+
+      - Online data code: prc_hicp_midx
+
+      - Filtered by:
+        - `coicop`: ????
+
+      - Transformations:
+        - average monthly data over the entire year
+
+      - Dataset: https://ec.europa.eu/eurostat/databrowser/view/prc_hicp_midx/default/table?lang=en
+      - https://ec.europa.eu/eurostat/cache/metadata/en/prc_hicp_esms.htm
+
+
+
+```{r}
+install.packages("eurostat")
+library(eurostat)
+library(lubridate)
+
+gov_10a_exp = eurostat::get_eurostat("gov_10a_exp")
+gov_10a_exp |>
+  mutate(year = lubridate::year(TIME_PERIOD)) |>
+  filter(
+    geo == "BE",
+    year == 2023,
+    values == 0.2,
+    startsWith(cofog99, "GF06")
+  ) |> print(n=100)
+```
+
+```{r}
+total_households <- read_xlsx("data/processed/total_households.xlsx")
+total_households
+```
+  
+```{r}
+df <- read_csv("data/processed/2023.csv", show_col_types = FALSE) |>
+  select(
+    country,
+    overburden_rate = overburden_rate_2023,
+    one_person_households = one_person_household_2023,
+    net_migration = population_change_2023,
+    gdp_log = log_gdp,
+    gov_expenditure = gov_expenditure,
+    hicp_avg = hicp_avg
+  ) |>
+  mutate(
+    gdp = exp(gdp_log),
+  ) |>
+  full_join(total_household, by="country")
+
+
+df
+```
+
+
+```{r}
+df
+```
+
+
+### Data Distributions
+
+```{r}
+ggplot(df, aes(x = population_change_2023)) +
+  geom_histogram(aes(y = after_stat(density)),
+    colour = 1, fill = "white"
+  ) +
+  geom_density()
+```
+
+```{r}
+ggplot(df, aes(x = household_adjusted)) +
+  geom_histogram(aes(y = after_stat(density)),
+    colour = 1, fill = "white"
+  ) +
+  geom_density()
+```
+
+```{r}
+ggplot(df, aes(x = log_gdp)) +
+  geom_histogram(aes(y = after_stat(density)),
+    colour = 1, fill = "white"
+  ) +
+  geom_density()
+```
+
+
+## Modeling data
+
+### Model 1
+
+```{r}
+cor(df$overburden_rate_2023, df$household_adjusted)
+cor(df$overburden_rate_2023, df$population_change_2023)
+```
+
+
+```{r}
+df |>
+  ggplot(aes(x = household_adjusted, y = population_change_2023, label = country)) +
+  geom_point() +
+  geom_rug()
+```
+
+```{r}
+cor(df$population_change_2023, df$household_adjusted)
+```
+
+```{r}
+df |>
+  select(- country) |>
+  cor(use = "pairwise.complete.obs")
+```
+
+
+```{r}
+model1 <- lm(
+  overburden_rate_2023 ~
+    household_adjusted +
+    population_change_2023,
+  data = df)
+)
+
+summary(model1)
+```
+
+
+
+```{r}
+coef(model1)
+```
+
+
+```{r, fig.dim=(10, 20)}
+df |>
+  ggplot(aes(x = household_adjusted, y = overburden_rate_2023)) +
+  geom_point() +
+  geom_abline(
+    intercept = coef(model1)[["(Intercept)"]],
+    slope     = coef(model1)[["household_adjusted"]],
+    color     = "steelblue",
+  ) +
+  geom_text_repel(aes(label = country), size = 3)
+
+```
+```{r}
+df |>
+  ggplot(aes(x = population_change_2023, y = overburden_rate_2023)) +
+  geom_point() +
+  geom_abline(
+    intercept = coef(model1)[["(Intercept)"]],
+    slope     = coef(model1)[["population_change_2023"]],
+    color     = "steelblue",
+  ) +
+  geom_text_repel(aes(label = country), size = 3)
+```
+
+
+```{r, fig.dim=(10, 20)}
+p1 = df_adjusted |>
+  ggplot(aes(x = household_adjusted, y = overburden_rate_2023)) +
+  geom_point() +
+  geom_abline(
+    intercept = coef(model1_adjusted)[["(Intercept)"]],
+    slope     = coef(model1)[["household_adjusted"]],
+    color     = "steelblue",
+  ) +
+  geom_text_repel(aes(label = country), size = 3)
+
+p2 = df_adjusted |>
+  ggplot(aes(x = population_change_2023, y = overburden_rate_2023)) +
+  geom_point() +
+  geom_abline(
+    intercept = coef(model1_adjusted)[["(Intercept)"]],
+    slope     = coef(model1)[["population_change_2023"]],
+    color     = "steelblue",
+  ) +
+  geom_text_repel(aes(label = country), size = 3)
+
+p1 / p2
+```
+
+```{r}
+
+```
+
+```{r}
+df |>
+  ggplot(aes(x = population_change_2023, y = overburden_rate_2023)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  geom_text_repel(aes(label = country), size = 3)
+```
+
+```{r}
+model1 <- lm(
+  overburden_rate_2023 ~ population_change_2023,
+  data = df
+)
+
+summary(model1)
+```
+
+#model 2 = predicting housing crisis using government expenditure on housing and gini coefficient (income inequality), controllig for log_gdp
+cor(df$overburden_rate_2023, gov_exp$gov_expenditure_housing_2023)
+cor(df$overburden_rate_2023, df$income_inequality)
+model2 <- lm(df$overburden_rate_2023 ~ df$gov_expenditure + df$income_inequality + df$log_gdp)
+summary(model2)
+
+df %>%
+  ggplot(aes(x = income_inequality, y = overburden_rate_2023)) +
+  geom_point(aes(color = df$gov_expenditure), size = 3) +
+  scale_color_viridis_c() +
+  geom_smooth(method = "lm", se = FALSE, color = "gray") +
+  labs(
+    x = "Income Inequality (Gini)",
+    y = "Housing Cost Overburden Rate",
+    color = "Gov. Exp. on Housing",
+    title = "Overburden vs. Inequality & Government Spending"
+  ) +
+  theme_minimal() +
+  geom_text_repel(aes(label = country), size = 3)
+
+#model 3 = predicting housing crisis using gdp and housing inflation
+  #calculating avarege hicp for each country for year 2023
+hicp_avg <- prc_hicp_midx %>%
+  rowwise() %>%
+  mutate(mean_housing_inflation_2023 = mean(c_across(Jan:Dec), na.rm = TRUE)) %>%
+  ungroup()
+
+  #model 3 = predicting housing crisis with gdp and inflation
+cor(df$overburden_rate_2023, hicp_avg$mean_housing_inflation_2023)
+cor(df$overburden_rate_2023, df3$log_gdp)
+model3 <- lm(df$overburden_rate_2023 ~ hicp_avg$mean_housing_inflation_2023 + df3$log_gdp)
+summary(model3)
+
+df3 %>% 
+  ggplot(aes(x = mean_housing_inflation_2023, y = overburden_rate_2023)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  geom_text_repel(aes(label = country), size = 3)
+
+df3 %>% 
+  ggplot(aes(x = log_gdp, y = overburden_rate_2023)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  geom_text_repel(aes(label = country), size = 3)
+
+ggplot(df3, aes(x = mean_housing_inflation_2023, y = overburden_rate_2023)) +
+  geom_point(aes(color = log_gdp), size = 3) +
+  geom_smooth(method = "lm", se = FALSE, color = "gray") +
+  scale_color_viridis_c() +
+  geom_text_repel(aes(label = country)) +
+  labs(
+    x = "Avg. Housing Inflation (2023)",
+    y = "Housing Cost Overburden Rate",
+    color = "log(GDP per capita)",
+    title = "Overburden Rate vs. Inflation, Colored by GDP"
+  ) +
+  theme_minimal()

@@ -1,0 +1,829 @@
+---
+title: "Housing Affordability Project"
+author: "Lucia Rojkova et. al."
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## 0. Install Dependencies
+
+In the first step we install libraries and dependencies we use in the code. This
+step is not necessary if we use RStudio, since the libraries can be installed
+there manually.
+
+The installed libraries are
+
+  - `tidyverse`: Working with data, processing data, cleaning data, statistics and
+visualizations.
+  - `eurostat`: R package for downloading datasets from Eurostat, so only the
+dataset ID is needed and all data is downloaded automatically
+  - `lubridata`: R package for parsing and reading date formats. In datasets dates
+are usually in different formats and often we want to extract only a part of the
+date such as year. This package makes working with different date formats
+easier.
+
+```{r setup, include=FALSE}
+# Install necessary libraries
+
+# Set CRAN repository for reproducibility
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+# Load necessary libraries.
+install.packages("tidyverse")
+install.packages("eurostat")
+install.packages("lubridate")
+
+library(tidyverse)
+library(eurostat)
+library(lubridate)
+```
+
+## 1. Directory Setup
+
+In this step we create 2 directories:
+
+  - `data/raw/`: We will store all data downloaded from Eurostat here.
+  - `data/processed/`: We will store the processed data here. 
+
+
+We just need to ensure that `data/raw/` and `data/processed/` exist. If they
+don't, create them.
+
+```{r create-directories}
+raw_dir <- "data/raw"
+processed_dir <- "data/processed"
+
+if (!dir.exists(raw_dir)) dir.create(raw_dir, recursive = TRUE)
+if (!dir.exists(processed_dir)) dir.create(processed_dir, recursive = TRUE)
+```
+
+## 2. Helper Function to Download Eurostat Tables
+
+Define a small helper function that checks for an existing CSV (dataset) in
+`data/raw/`. 
+
+If absent, it downloads the full raw table via `get_eurostat()` (using the
+`eurostat` package) and saves it as `<dataset_code>_raw.csv`.
+
+This code is useful because it automatically downloads all datasets from source
+(so we know it is up-to-date and reproducible -> everyone with the code can work
+with the same data as us), and we do not unnecessarily download it more times if
+we already have it.
+
+```{r download-function}
+download_eurostat_raw <- function(dataset_code, raw_dir) {
+  # Set raw_file to be the filename where we want to save the dataset
+  raw_file <- file.path(raw_dir, paste0(dataset_code, "_raw.csv"))
+
+  # If the file does not exist, download and save it
+  if (!file.exists(raw_file)) {
+    message("Downloading ", dataset_code, " from Eurostat...")
+
+    # Download the dataset using the eurostat package
+    df <- eurostat::get_eurostat(dataset_code, time_format = "date")
+
+    # Save the data as a CSV to `raw_file`
+    readr::write_csv(df, raw_file)
+
+    message("Saved to ", raw_file)
+  } else {
+    # The dataset is already downloaded and we do not need to do anything.
+    message(raw_file, " already exists; skipping download.")
+  }
+
+  raw_file
+}
+```
+
+## 3. Download Specified Datasets
+
+We will download the following five Eurostat datasets:
+
+* `lfst_hhnhtych`: Number of households by household composition, number of children, and age of youngest child
+* `sdg_10_10`: Purchasing power adjusted GDP per capita
+* `prc_hicp_midx`: HICP - monthly data (index)
+* `ilc_lvho07a`: Housing cost overburden rate by age, sex, and poverty status
+* `tps00001`: Population on 1 January
+
+```{r download-datasets}
+datasets <- c(
+  "lfst_hhnhtych", # Household composition by type
+  "sdg_10_10", # GDP per capita (PPP)
+  "prc_hicp_midx", # HICP monthly index
+  "ilc_lvho07a", # Housing cost overburden rate
+  "tps00001" # Population on 1 January
+)
+
+# Initialize an empty vector to store file paths
+raw_paths <- character(length(datasets))
+
+# Loop through each dataset and download it
+for (i in 1:length(datasets)) {
+  current_dataset <- datasets[i]
+
+  # Download the raw Eurostat data and get the file path where it was saved
+  raw_path <- download_eurostat_raw(
+    dataset_code = current_dataset,
+    raw_dir = raw_dir
+  )
+
+  # Store this file path in our results vector
+  raw_paths[i] <- raw_path
+}
+
+raw_paths
+```
+
+After running the above code, you should see CSV files in `data/raw/` such as:
+
+```
+data/raw/lfst_hhnhtych_raw.csv
+data/raw/sdg_10_10_raw.csv
+data/raw/prc_hicp_midx_raw.csv
+data/raw/ilc_lvho07a_raw.csv
+data/raw/tps00001_raw.csv
+```
+
+## 4. Process HICP: Compute Annual Averages
+
+The HICP index contains the prices of products (see the dataset documentation).
+This can be used to gauge the inflation and the general increase of prices. It
+is a good control variable to account for inflation. This can be used to gauge
+the inflation and the general increase of prices. It is a good control variable
+to account for inflation.
+
+However, there is a problem with the dataset because it includes data for every
+month. We want to work only with years. To solve this, we take the mean of the
+prices over all months in each year.
+
+For the `prc_hicp_midx` dataset (monthly HICP index), we will:
+
+1. Read the raw dataset from CSV
+2. Filter to the “all-items” `coicop` code (`CP00`)
+3. Compute an annual average of the `values` column for each country (`geo`)
+4. Save the resulting processed table as `prc_hicp_annual_avg.csv` under `data/processed/`
+
+```{r process-hicp}
+# Load the downloaded data CSV from disk
+hicp_raw_file <- file.path(raw_dir, "prc_hicp_midx_raw.csv")
+
+hicp_annual <- read_csv(hicp_raw_file, show_col_types = FALSE) |>
+  # Keep only the `all‐items` index (This code can be found in Eurostat
+  # documentation for this particular dataset)
+  filter(coicop == "CP00") |>
+
+  # Create a new column `year` with the year value extracted from the
+  # `TIME_PERIOD` column
+  mutate(year = lubridate::year(TIME_PERIOD)) |>
+
+  # Group data by country (`geo`) and year (`year`)
+  group_by(geo, year) |>
+
+  # Create a new column `hicp_annual_avg` that will will be contain the mean of
+  # the `values` column for each group (geo, year)
+  summarise(
+    # Remove any null values before summary
+    hicp_annual_avg = mean(values, na.rm = TRUE),
+
+    # When you use `group_by(geo, year)`, you're telling R to treat your data as
+    # a collection of mini-datasets, one for each unique combination of country
+    # and year. Think of it like sorting a deck of cards into separate piles
+    # based on suit and rank - each pile represents one group.
+
+    # When `summarise()` processes grouped data, it has to make a decision about
+    # what to do with the grouping structure afterwards. By default,
+    # `summarise()` follows this rule: *it removes the last grouping variable
+    # but keeps all the others.*
+    #
+    # In this case, since we grouped by geo and year, after `summarise()` runs:
+    #
+    #  - The `year` grouping gets dropped (it was the last variable)
+    #  - The `geo` grouping remains active
+    #  - The resulting data is still grouped by country
+    #
+    # When we specify .groups = "drop", you're explicitly telling R: "After you
+    # finish summarizing, remove ALL grouping and give me back a regular
+    # tibble."
+    #
+    # This prevents any surprise behaviors in subsequent operations.
+    .groups = "drop"
+  )
+
+# Create a new filename in the `processed_dir` for the processed data
+processed_file <- file.path(processed_dir, "prc_hicp_annual_avg.csv")
+
+# Save the processed data to disk
+write_csv(hicp_annual, processed_file)
+
+message("Processed HICP annual averages written to ", processed_file)
+```
+
+After executing the above, you will find:
+
+```
+data/processed/prc_hicp_annual_avg.csv
+```
+
+which contains columns:
+
+* `geo` (country code)
+* `year` (calendar year)
+* `hicp_annual_avg` (average of monthly HICP values for that year)
+
+```{r load-and-combine-raw, message=FALSE, warning=FALSE}
+# Load all CSV data from disk
+lfst_raw <- read_csv("data/raw/lfst_hhnhtych_raw.csv", show_col_types = FALSE)
+gdp_raw <- read_csv("data/raw/sdg_10_10_raw.csv", show_col_types = FALSE)
+hicp_annual <- read_csv("data/processed/prc_hicp_annual_avg.csv", show_col_types = FALSE)
+hcob_raw <- read_csv("data/raw/ilc_lvho07a_raw.csv", show_col_types = FALSE)
+pop_raw <- read_csv("data/raw/tps00001_raw.csv", show_col_types = FALSE)
+```
+
+## 2. Process Each Dataset into (geo, year, value)
+
+In this section, we process every dataset so that it has columns
+
+ - `geo`: Code of the country (e.g. `SK`, `CZ`, `DE`, ...)
+ - `year`: The year when the data was collected
+ - "value": The actual value of the particular index/data point we are
+ interested in. The name of the value will be specific and descriptive for each
+ individual index.
+
+### 2.1 One-Person Households (`lfst_hhnhtych`)
+
+In the `lfst_hhnhtych` dataset, the column for household composition is
+`hhtyp`. 
+
+We know that `"HHC_22"` corresponds to “one-person” households (this can be
+found in the documentation of the dataset on the Eurostat website). 
+
+
+```{r process-lfst}
+lfst_proc <-
+  lfst_raw |>
+
+  # Create a new column `year` with the year value extracted from the
+  # `TIME_PERIOD` column
+  mutate(year = year(TIME_PERIOD)) |>
+
+  # Keep only one-person households (hhtyp == "HHC_22")
+  filter(hhcomp == "HHC_22") |>
+
+  # Group data by country (`geo`) and year (`year`)
+  group_by(geo, year) |>
+
+  # Get the mean number of one-person households for a year in every country
+  summarise(
+    one_person_hh = mean(values, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+### 2.2 GDP per Capita (`sdg_10_10`)
+
+This dataset is already annual. We extract `year` from `TIME_PERIOD` and rename
+`values` to `gdp_per_capita`.
+
+```{r process-gdp}
+gdp_proc <-
+  gdp_raw |>
+
+  # Create a new column `year` with the year value extracted from the
+  # `TIME_PERIOD` column
+  mutate(year = year(TIME_PERIOD)) |>
+
+  # Group data by country (`geo`) and year (`year`)
+  group_by(geo, year) |>
+
+  # Get the mean GDP per-capita for each year in every country
+  summarise(
+    gdp_per_capita = mean(values, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+### 2.3 HICP Annual Averages (`prc_hicp_midx`)
+
+We already computed annual averages in `hicp_annual`, with columns `(geo, year, hicp_annual_avg)`. 
+Rename for consistency.
+
+```{r process-hicp-rename}
+hicp_proc <-
+  hicp_annual |>
+  # Just rename the column for the index
+  rename(hicp_index = hicp_annual_avg)
+```
+
+### 2.4 Housing Cost Overburden Rate (`ilc_lvho07a`)
+
+We want the overall average (all ages, both sexes, all income situations).
+Typically, the raw file contains dimensions:
+
+* `age` (e.g., `"TOTAL"` for all ages)
+* `sex` (e.g., `"T"` for total/both)
+* `incgrp` (e.g., `"TOT"` for total population)
+
+These values can be found documented on the Eurostat website.
+
+```{r process-hcob}
+hcob_proc <-
+  hcob_raw |>
+
+  # Create a new column `year` with the year value extracted from the
+  # `TIME_PERIOD` column
+  mutate(year = year(TIME_PERIOD)) |>
+
+  # Keep only overall totals
+  filter(
+    age == "TOTAL",
+    sex == "T",
+    incgrp == "TOTAL"
+  ) |>
+
+  # Group data by country (`geo`) and year (`year`)
+  group_by(geo, year) |>
+
+  # Get the mean overburden rate for each year in every country
+  summarise(
+    hc_overburden = mean(values, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+### 2.5 Population on 1 January (`tps00001`)
+
+Extract `year` from `TIME_PERIOD` and rename `values` to `population`.
+
+```{r process-pop}
+pop_proc <-
+  pop_raw |>
+
+  # Create a new column `year` with the year value extracted from the
+  # `TIME_PERIOD` column
+  mutate(year = year(TIME_PERIOD)) |>
+
+  # Group data by country (`geo`) and year (`year`)
+  group_by(geo, year) |>
+
+  # Get the mean Population for each year in every country
+  summarise(
+    population = mean(values, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+## 3. Combine All Indices into One Data Frame
+
+We now perform a join all datasets on `(geo, year)` so that every country-year
+pair appears, even if one dataset is missing for that pair. After joining, each
+row will have:
+
+* `one_person_hh`
+* `gdp_per_capita`
+* `hicp_index`
+* `hc_overburden`
+* `population`
+
+```{r combine-all}
+combined_df <-
+  lfst_proc |>
+  full_join(gdp_proc, by = c("geo", "year")) |>
+  full_join(hicp_proc, by = c("geo", "year")) |>
+  full_join(hcob_proc, by = c("geo", "year")) |>
+  full_join(pop_proc, by = c("geo", "year")) |>
+
+  # Normalize one‐person households by population:
+  mutate(
+    one_person_hh_per_capita = one_person_hh / population
+  ) |>
+  arrange(geo, year)
+
+# Inspect the first few rows
+print(combined_df, n = 10)
+```
+
+### 3.1 Save the Combined Table
+
+Save the final processed and cleaned dataset to disk, so that we can just load
+it and continue from this point.
+
+```{r save-combined}
+write_csv(combined_df, "data/processed/combined_indices.csv")
+message("Saved combined indices to data/processed/combined_indices.csv")
+```
+
+
+```{r}
+# Assuming combined_df is already in your environment
+combined_df |>
+  # Remove rows where one_person_hh is NA
+  filter(
+    geo == "DE" |
+      geo == "CZ" |
+      geo == "PL" |
+      geo == "SK" |
+      geo == "EU28"
+  ) |>
+  filter(!is.na(one_person_hh_per_capita)) |>
+  ggplot(aes(x = year, y = one_person_hh_per_capita, color = geo, group = geo)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "Share of One-Person Households Over Time by Country",
+    x = "Year",
+    y = "Number of One-Person Households (in 1,000s)",
+    color = "Country"
+  ) +
+  theme_minimal()
+```
+
+## Data Exploration
+
+This section examines how the distributions of our key indicators changed before (≤ 2021) and after (≥ 2022) the outbreak of the Ukraine war (Feb 24 2022). We will generate, for each numeric variable in **`combined_df`**:
+
+1. A QQ plot with pre‐war quantiles on the x‐axis and post‐war quantiles on the y‐axis.
+2. An overlaid histogram + density plot, with pre‐war and post‐war distributions distinguished by color/ fill.
+
+Throughout, we:
+
+- Define **pre‐war** as all observations where `year ≤ 2021`  
+- Define **post‐war** as all observations where `year ≥ 2022`  
+- Drop `NA` values on a per‐variable basis  
+- Use **tidyverse** and the native pipe `|>` exclusively  
+- Keep each plot in its own code chunk with a brief description  
+
+```{r load-packages-and-data, echo=TRUE}
+# If combined_df is not yet in memory, read it:
+# (Adjust the path if necessary; this assumes you have already run the preprocessing step.)
+if (!exists("combined_df")) {
+  combined_df <- read_csv("data/processed/combined_indices.csv", show_col_types = FALSE)
+}
+
+# Preview the six numeric variables we'll explore:
+# - one_person_hh
+# - gdp_per_capita
+# - hicp_index
+# - hc_overburden
+# - population
+# - one_person_hh_per_capita
+glimpse(combined_df)
+```
+
+---
+
+### QQ Plots
+
+Below are QQ plots for each variable. In each plot:
+
+* The **x‐axis** shows quantiles of the **pre‐war** sample (`year ≤ 2021`).
+* The **y‐axis** shows quantiles of the **post‐war** sample (`year ≥ 2022`).
+* We compute quantiles at 100 evenly‐spaced probabilities (`probs = seq(0,1, length.out = 100)`), after dropping `NA`.
+
+#### 1. QQ Plot: One-Person Households (`one_person_hh`)
+
+*This QQ plot compares the distribution of the total number of one‐person households before vs. after the war.*
+
+```{r qq-one_person_hh, fig.width=6, fig.height=5, echo=TRUE}
+# Extract non‐NA values pre‐war and post‐war
+pre_op <- combined_df |>
+  filter(year <= 2021) |>
+  pull(one_person_hh_per_capita) |>
+  na.omit()
+post_op <- combined_df |>
+  filter(year >= 2022) |>
+  pull(one_person_hh_per_capita) |>
+  na.omit()
+
+# Compute matching quantiles (100 points)
+probs <- seq(0, 1, length.out = 100)
+q_pre <- quantile(pre_op, probs = probs, na.rm = TRUE)
+q_post <- quantile(post_op, probs = probs, na.rm = TRUE)
+
+# Build a tibble of quantiles and plot
+tibble(pre = q_pre, post = q_post) |>
+  ggplot(aes(x = pre, y = post)) +
+  geom_point(alpha = 0.6) +
+  geom_abline(linetype = "dashed", color = "gray50") +
+  labs(
+    title = "QQ Plot: One-Person Households (pre-war vs. post-war)",
+    x = "Pre-war Quantiles (2013–2021)",
+    y = "Post-war Quantiles (2022–2024)"
+  ) +
+  theme_minimal()
+```
+
+#### 2. QQ Plot: GDP per Capita (`gdp_per_capita`)
+
+*This QQ plot compares the distribution of GDP per capita (PPP) before vs. after the war.*
+
+```{r qq-gdp_per_capita, fig.width=6, fig.height=5, echo=TRUE}
+pre_gdp <- combined_df |>
+  filter(year <= 2021) |>
+  pull(gdp_per_capita) |>
+  na.omit()
+post_gdp <- combined_df |>
+  filter(year >= 2022) |>
+  pull(gdp_per_capita) |>
+  na.omit()
+
+q_pre <- quantile(pre_gdp, probs = probs, na.rm = TRUE)
+q_post <- quantile(post_gdp, probs = probs, na.rm = TRUE)
+
+tibble(pre = q_pre, post = q_post) |>
+  ggplot(aes(x = pre, y = post)) +
+  geom_point(alpha = 0.6) +
+  geom_abline(linetype = "dashed", color = "gray50") +
+  labs(
+    title = "QQ Plot: GDP per Capita (pre-war vs. post-war)",
+    x = "Pre-war Quantiles (2013–2021)",
+    y = "Post-war Quantiles (2022–2024)"
+  ) +
+  theme_minimal()
+```
+
+#### 3. QQ Plot: HICP Index (`hicp_index`)
+
+*This QQ plot compares the distribution of the annual HICP index (all items) before vs. after the war.*
+
+```{r qq-hicp_index, fig.width=6, fig.height=5, echo=TRUE}
+pre_hicp <- combined_df |>
+  mutate(hicp_index_log = log(hicp_index)) |>
+  filter(year <= 2021) |>
+  pull(hicp_index_log) |>
+  na.omit()
+post_hicp <- combined_df |>
+  mutate(hicp_index_log = log(hicp_index)) |>
+  filter(year >= 2022) |>
+  pull(hicp_index_log) |>
+  na.omit()
+
+q_pre <- quantile(pre_hicp, probs = probs, na.rm = TRUE)
+q_post <- quantile(post_hicp, probs = probs, na.rm = TRUE)
+
+tibble(pre = q_pre, post = q_post) |>
+  ggplot(aes(x = pre, y = post)) +
+  geom_point(alpha = 0.6) +
+  geom_abline(linetype = "dashed", color = "gray50") +
+  labs(
+    title = "QQ Plot: HICP Index (pre-war vs. post-war)",
+    x = "Pre-war Quantiles (2013–2021)",
+    y = "Post-war Quantiles (2022–2024)"
+  ) +
+  theme_minimal()
+```
+
+#### 4. QQ Plot: Housing Cost Overburden Rate (`hc_overburden`)
+
+*This QQ plot compares the distribution of the housing cost overburden rate (all ages, sexes, income groups) before vs. after the war.*
+
+```{r qq-hc_overburden, fig.width=6, fig.height=5, echo=TRUE}
+pre_hc <- combined_df |>
+  filter(year <= 2021) |>
+  pull(hc_overburden) |>
+  na.omit()
+post_hc <- combined_df |>
+  filter(year >= 2022) |>
+  pull(hc_overburden) |>
+  na.omit()
+
+q_pre <- quantile(pre_hc, probs = probs, na.rm = TRUE)
+q_post <- quantile(post_hc, probs = probs, na.rm = TRUE)
+
+tibble(pre = q_pre, post = q_post) |>
+  ggplot(aes(x = pre, y = post)) +
+  geom_point(alpha = 0.6) +
+  geom_abline(linetype = "dashed", color = "gray50") +
+  labs(
+    title = "QQ Plot: Housing Cost Overburden Rate (pre-war vs. post-war)",
+    x = "Pre-war Quantiles (2013–2021)",
+    y = "Post-war Quantiles (2022–2024)"
+  ) +
+  theme_minimal()
+```
+
+#### 5. QQ Plot: Population (`population`)
+
+*This QQ plot compares the distribution of total population (on January 1) before vs. after the war.*
+
+```{r qq-population, fig.width=6, fig.height=5, echo=TRUE}
+pre_pop <- combined_df |>
+  filter(year <= 2021) |>
+  pull(population) |>
+  na.omit()
+post_pop <- combined_df |>
+  filter(year >= 2022) |>
+  pull(population) |>
+  na.omit()
+
+q_pre <- quantile(pre_pop, probs = probs, na.rm = TRUE)
+q_post <- quantile(post_pop, probs = probs, na.rm = TRUE)
+
+tibble(pre = q_pre, post = q_post) |>
+  ggplot(aes(x = pre, y = post)) +
+  geom_point(alpha = 0.6) +
+  geom_abline(linetype = "dashed", color = "gray50") +
+  labs(
+    title = "QQ Plot: Population (pre-war vs. post-war)",
+    x = "Pre-war Quantiles (2013–2021)",
+    y = "Post-war Quantiles (2022–2024)"
+  ) +
+  theme_minimal()
+```
+
+#### 6. QQ Plot: One-Person Households per Capita (`one_person_hh_per_capita`)
+
+*This QQ plot compares the distribution of one‐person households per capita before vs. after the war.*
+
+```{r qq-one_person_hh_per_capita, fig.width=6, fig.height=5, echo=TRUE}
+pre_op_pc <- combined_df |>
+  filter(year <= 2021) |>
+  pull(one_person_hh_per_capita) |>
+  na.omit()
+post_op_pc <- combined_df |>
+  filter(year >= 2022) |>
+  pull(one_person_hh_per_capita) |>
+  na.omit()
+
+q_pre <- quantile(pre_op_pc, probs = probs, na.rm = TRUE)
+q_post <- quantile(post_op_pc, probs = probs, na.rm = TRUE)
+
+tibble(pre = q_pre, post = q_post) |>
+  ggplot(aes(x = pre, y = post)) +
+  geom_point(alpha = 0.6) +
+  geom_abline(linetype = "dashed", color = "gray50") +
+  labs(
+    title = "QQ Plot: One-Person Households per Capita (pre-war vs. post-war)",
+    x = "Pre-war Quantiles (2013–2021)",
+    y = "Post-war Quantiles (2022–2024)"
+  ) +
+  theme_minimal()
+```
+
+---
+
+### Histogram + Density Comparisons
+
+In the plots below, each panel shows:
+
+* An overlaid **histogram** of the chosen variable, with `y = ..density..`.
+* An overlaid **density curve** (same scale) for pre‐war vs. post‐war.
+* We use `fill = period` (semi‐transparent) for the histogram and `color = period` for the density line.
+* We bin each histogram into 30 bins. Adjust `bins` if you prefer more/fewer bins.
+
+#### 1. Histogram + Density: One-Person Households (`one_person_hh`)
+
+```{r hist-one_person_hh, fig.width=6, fig.height=5, echo=TRUE}
+# Prepare a data frame with a new 'period' column
+hist_op_df <- combined_df |>
+  filter(!is.na(one_person_hh)) |>
+  mutate(period = if_else(year <= 2021, "Pre-war", "Post-war"))
+
+ggplot(hist_op_df, aes(x = one_person_hh, fill = period)) +
+  geom_histogram(aes(y = after_stat(density)),
+    alpha = 1, position = "identity", bins = 30
+  ) +
+  geom_density(aes(color = period), size = 1, alpha = 0.4, outline.type = ) +
+  labs(
+    title = "Distribution: One-Person Households (pre-war vs. post-war)",
+    x = "One-Person Households",
+    y = "Density",
+    fill = "Period",
+    color = "Period"
+  ) +
+  theme_minimal()
+```
+
+#### 2. Histogram + Density: GDP per Capita (`gdp_per_capita`)
+
+```{r hist-gdp_per_capita, fig.width=6, fig.height=5, echo=TRUE}
+hist_gdp_df <- combined_df |>
+  filter(!is.na(gdp_per_capita)) |>
+  mutate(period = if_else(year <= 2021, "Pre-war", "Post-war"))
+
+ggplot(hist_gdp_df, aes(x = gdp_per_capita, fill = period)) +
+  geom_histogram(aes(y = ..density..),
+    alpha = 0.4, position = "identity", bins = 30
+  ) +
+  geom_density(aes(color = period), size = 1) +
+  labs(
+    title = "Distribution: GDP per Capita (pre-war vs. post-war)",
+    x = "GDP per Capita (PPP)",
+    y = "Density",
+    fill = "Period",
+    color = "Period"
+  ) +
+  theme_minimal()
+```
+
+#### 3. Histogram + Density: HICP Index (`hicp_index`)
+
+```{r hist-hicp_index, fig.width=6, fig.height=5, echo=TRUE}
+hist_hicp_df <- combined_df |>
+  filter(!is.na(hicp_index)) |>
+  mutate(period = if_else(year <= 2021, "Pre-war", "Post-war"))
+
+ggplot(hist_hicp_df, aes(x = hicp_index, fill = period)) +
+  geom_histogram(aes(y = ..density..),
+    alpha = 0.4, position = "identity", bins = 30
+  ) +
+  geom_density(aes(color = period), size = 1) +
+  labs(
+    title = "Distribution: HICP Index (pre-war vs. post-war)",
+    x = "Annual HICP Index (All Items)",
+    y = "Density",
+    fill = "Period",
+    color = "Period"
+  ) +
+  theme_minimal()
+```
+
+#### 4. Histogram + Density: Housing Cost Overburden Rate (`hc_overburden`)
+
+```{r hist-hc_overburden, fig.width=6, fig.height=5, echo=TRUE}
+hist_hc_df <- combined_df |>
+  filter(!is.na(hc_overburden)) |>
+  mutate(period = if_else(year <= 2021, "Pre-war", "Post-war"))
+
+ggplot(hist_hc_df, aes(x = hc_overburden, fill = period)) +
+  geom_histogram(aes(y = ..density..),
+    alpha = 0.4, position = "identity", bins = 30
+  ) +
+  geom_density(aes(color = period), size = 1) +
+  labs(
+    title = "Distribution: Housing Cost Overburden Rate (pre-war vs. post-war)",
+    x = "Housing Cost Overburden Rate (%)",
+    y = "Density",
+    fill = "Period",
+    color = "Period"
+  ) +
+  theme_minimal()
+```
+
+#### 5. Histogram + Density: Population (`population`)
+
+```{r hist-population, fig.width=6, fig.height=5, echo=TRUE}
+hist_pop_df <- combined_df |>
+  filter(!is.na(population)) |>
+  mutate(period = if_else(year <= 2021, "Pre-war", "Post-war"))
+
+ggplot(hist_pop_df, aes(x = population, fill = period)) +
+  geom_histogram(aes(y = ..density..),
+    alpha = 0.4, position = "identity", bins = 30
+  ) +
+  geom_density(aes(color = period), size = 1) +
+  labs(
+    title = "Distribution: Population (pre-war vs. post-war)",
+    x = "Population (Jan 1)",
+    y = "Density",
+    fill = "Period",
+    color = "Period"
+  ) +
+  theme_minimal()
+```
+
+#### 6. Histogram + Density: One-Person Households per Capita (`one_person_hh_per_capita`)
+
+```{r hist-one_person_hh_per_capita, fig.width=6, fig.height=5, echo=TRUE}
+hist_op_pc_df <- combined_df |>
+  filter(!is.na(one_person_hh_per_capita)) |>
+  mutate(period = if_else(year <= 2021, "Pre-war", "Post-war"))
+
+ggplot(hist_op_pc_df, aes(x = one_person_hh_per_capita, fill = period)) +
+  geom_histogram(aes(y = ..density..),
+    alpha = 0.4, position = "identity", bins = 30
+  ) +
+  geom_density(aes(color = period), size = 1) +
+  labs(
+    title = "Distribution: One-Person Households per Capita (pre-war vs. post-war)",
+    x = "One-Person Households per Capita",
+    y = "Density",
+    fill = "Period",
+    color = "Period"
+  ) +
+  theme_minimal()
+```
+
+---
+
+**Notes on Implementation**:
+
+1. **Defining “pre‐war” and “post‐war”**
+   We split by `year <= 2021` vs. `year >= 2022`. These year‐based splits approximate “before” and “after” Feb 24 2022, since our data are annual.
+
+2. **Dropping NA’s**
+   Each chunk calls `filter(!is.na(var))` before plotting. This ensures that missing values do not interfere with quantile calculations or density estimates.
+
+3. **Quantile Calculation for QQ plots**
+   We take 100 evenly‐spaced quantile probabilities (`seq(0,1,length.out=100)`). For each variable, we compute `quantile(pre_values, probs)`, `quantile(post_values, probs)`, then make a simple scatter‐plot of `(pre_quantile, post_quantile)` with a 45° reference line.
+
+4. **Histogram + Density**
+
+   * We request `geom_histogram(aes(y=..density..))` with `alpha=0.4` so the density curves (plotted using `geom_density(aes(color=period))`) align correctly on the density scale.
+   * We use `bins = 30` uniformly, but you can adjust that if you want finer or coarser bin‐widths.
+
+5. **Code Organization**
+
+   * Each plot has its own named chunk (e.g., `qq-one_person_hh`, `hist-gdp_per_capita`), with a brief descriptive caption above.
+   * We rely on base `tidyverse` and the native pipe (`|>`), so this is compatible with R 4.3.0+.
+
+With these plots in place, you can visually assess whether—and how—the distributions of each indicator shifted after the onset of the Ukraine war.
